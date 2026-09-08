@@ -1,0 +1,44 @@
+# [hub] systemd unit for running the VRCX Hub directly (no container).
+#
+# Install:
+#   sudo cp docker/vrcx-hub.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now vrcx-hub
+#
+# Assumes the built Hub lives in /opt/vrcx-hub (main.js, package.json,
+# node_modules and build/Electron), owned by the `vrcx` user.
+
+[Unit]
+Description=VRCX Hub (headless VRCX backend)
+Documentation=https://github.com/vrcx-team/VRCX
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vrcx
+Group=vrcx
+WorkingDirectory=/opt/vrcx-hub
+Environment=NODE_ENV=production
+Environment=DOTNET_ROOT=/usr/share/dotnet
+Environment=VRCX_HUB_DATA=/var/lib/vrcx-hub
+ExecStart=/usr/bin/node /opt/vrcx-hub/main.js --host=0.0.0.0
+
+# The Hub is meant to keep collecting; restart it whatever happens.
+Restart=always
+RestartSec=10
+
+# It writes only to its data directory and needs no privileges.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/vrcx-hub
+StateDirectory=vrcx-hub
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vrcx-hub
+
+[Install]
+WantedBy=multi-user.target
