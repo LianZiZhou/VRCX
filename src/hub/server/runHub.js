@@ -173,6 +173,40 @@ export async function runHub(options = {}) {
         server.broadcast(EventType.PIPELINE, raw);
     });
 
+    // --- session mirroring ------------------------------------------------
+    // Clients keep a local copy of the Hub's VRChat cookies so that when the
+    // Hub goes away they can fall back to standalone without a fresh login and
+    // a 2FA prompt. Broadcast on change rather than on a timer: the cookie jar
+    // only moves on login, logout and token refresh.
+    let lastSessionFingerprint = null;
+    async function broadcastSessionIfChanged() {
+        if (!server.clientCount) {
+            return;
+        }
+        try {
+            const cookies = await natives.WebApi.GetCookies();
+            const userId = stores.user.currentUser?.id ?? null;
+            const fingerprint = `${userId}:${cookies?.length ?? 0}:${cookies ?? ''}`;
+            if (fingerprint === lastSessionFingerprint) {
+                return;
+            }
+            lastSessionFingerprint = fingerprint;
+            await server.broadcast(EventType.SESSION, {
+                loggedIn: Boolean(userId),
+                userId,
+                displayName: stores.user.currentUser?.displayName ?? null,
+                cookies
+            });
+        } catch (err) {
+            log('Failed to broadcast session state', err);
+        }
+    }
+
+    const sessionTimer = setInterval(() => {
+        broadcastSessionIfChanged().catch(() => {});
+    }, 15000);
+    sessionTimer.unref?.();
+
     await server.start();
     log(`Listening on ${config.host}:${config.port}`);
     log(`Token: ${config.configDir}/hub-token`);
@@ -216,6 +250,7 @@ export async function runHub(options = {}) {
         }
         stopping = true;
         log('Shutting down');
+        clearInterval(sessionTimer);
         setPipelineObserver(null);
         await server.stop();
         await status.stop();
