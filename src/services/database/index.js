@@ -18,6 +18,10 @@ import { printFavorites } from './printFavorites.js';
 
 import sqliteService from '../sqlite.js';
 
+// [hub] Suppresses derived writes when this process is a mirror client; a
+// no-op in standalone and hub modes. See src/hub/client/databaseGuard.js.
+import { guardDatabase } from '../../hub/client/databaseGuard.js';
+
 const dbVars = {
     userId: '',
     userPrefix: '',
@@ -25,7 +29,7 @@ const dbVars = {
     searchTableSize: 5000
 };
 
-const database = {
+const rawDatabase = {
     ...feed,
     ...activityV2,
     ...gameLog,
@@ -239,6 +243,9 @@ const database = {
         await sqliteService.executeNonQuery('PRAGMA optimize');
     }
 };
+
+// [hub]
+const database = guardDatabase(rawDatabase);
 
 window.database = database;
 export { database, dbVars };
