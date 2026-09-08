@@ -108,6 +108,35 @@ export function mountHubCore() {
 }
 
 /**
+ * Start the periodic work and sign in.
+ *
+ * Separate from `startHubCore` so tests can build the store graph without
+ * touching the network or starting timers.
+ *
+ * `App.vue`'s onMounted also calls `getGameLogTable()`,
+ * `checkAutoBackupRestoreVrcRegistry()` and `runCheckVRChatDebugLoggingFlow()`.
+ * All three read a local VRChat install, and `getGameLogTable()` additionally
+ * sleeps for ten seconds tailing log files, so none of them belong here.
+ *
+ * @param {object} stores
+ * @returns {Promise<boolean>} whether the database came up
+ */
+export async function startHubRuntime(stores) {
+    stores.updateLoop.updateLoop();
+
+    const databaseReady = await stores.vrcx.waitForDatabaseInit();
+    if (!databaseReady) {
+        return false;
+    }
+    await stores.auth.migrateStoredUsers();
+    // Signs in from the stored credentials. The pipeline socket follows on its
+    // own: stores/auth.js watches `watchState.isFriendsLoaded` and calls
+    // initWebsocket() when it flips.
+    await stores.auth.autoLoginAfterMounted();
+    return true;
+}
+
+/**
  * Full headless boot: interop -> locale -> dayjs -> stores.
  *
  * Does not start the update loop or log in; callers decide when to do that so

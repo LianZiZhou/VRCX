@@ -31,6 +31,11 @@ import { runUpdateFriendFlow } from '../coordinators/friendPresenceCoordinator';
 import { runSetCurrentUserLocationFlow } from '../coordinators/locationCoordinator';
 import { watchState } from './watchState';
 
+// [hub] The Hub owns the single VRChat pipeline socket and relays messages to
+// mirror clients; see src/hub/shared/pipelineRelay.js.
+import { isMirrorMode } from '../hub/shared/mode.js';
+import { emitPipelineMessage, setPipelineInjector } from '../hub/shared/pipelineRelay.js';
+
 import * as workerTimers from 'worker-timers';
 
 let webSocket = null;
@@ -53,6 +58,10 @@ export const wsState = reactive({
  */
 export function initWebsocket() {
     if (!watchState.isFriendsLoaded || webSocket !== null) {
+        return;
+    }
+    // [hub] A mirror client receives pipeline events relayed from the Hub.
+    if (isMirrorMode()) {
         return;
     }
     return request('auth', {
@@ -141,6 +150,9 @@ function connectWebSocket(token) {
                 return;
             }
             lastWebSocketMessage = data;
+            // [hub] Relay to mirror clients before parsing, so they receive
+            // exactly what VRChat sent.
+            emitPipelineMessage(data);
             let json;
             try {
                 json = JSON.parse(data);
@@ -194,6 +206,10 @@ export function reconnectWebSocket() {
     closeWebSocket();
     initWebsocket();
 }
+
+// [hub] Registered here rather than imported by pipelineRelay, which would
+// create a cycle.
+setPipelineInjector(handlePipeline);
 
 /**
  * @param {object} args
