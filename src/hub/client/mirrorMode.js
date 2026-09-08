@@ -26,6 +26,7 @@
 import { createRemoteSQLite, createRemoteWebApi } from './remoteInterop.js';
 import { ConnectionState, createHubConnection } from './connection.js';
 import { EventType } from '../shared/protocol.js';
+import { handleHubConnectionState } from './fallback.js';
 import { HubMode, setHubMode } from '../shared/mode.js';
 import { injectPipelineMessage } from '../shared/pipelineRelay.js';
 import { setUplinkSender } from './uplink.js';
@@ -167,6 +168,11 @@ export async function initMirrorMode(options) {
         },
         onStateChange: (state, detail) => {
             hubClientState.connectionState = state;
+            // Only once attached: a failure during the initial attempt is a
+            // silent fall back to standalone, not something to interrupt over.
+            if (hubClientState.active) {
+                handleHubConnectionState(state, detail);
+            }
             onStateChange(state, detail);
         }
     });
