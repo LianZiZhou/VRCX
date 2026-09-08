@@ -55,6 +55,12 @@ export const DERIVED_WRITES = Object.freeze(
         'setFriendLogCurrentArray',
         'deleteFriendLogCurrent',
 
+        // services/database/moderation.js — derived purely from Photon events
+        // (stores/photon.js is the only caller). Photon arrives on the Hub via
+        // the client uplink, so the Hub owns these writes like any other.
+        'setModeration',
+        'deleteModeration',
+
         // services/database/avatarFavorites.js — avatar history tracking.
         // addAvatarTimeSpent is `SET time = time + @x`, a read-modify-write in
         // SQL: if both the Hub and a client ran it the counter would double.
