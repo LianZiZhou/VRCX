@@ -17,6 +17,9 @@ export default defineConfig({
         environment: 'jsdom',
         setupFiles: ['./vitest.setup.js'],
         include: ['src/**/*.{test,spec}.js'],
+        // [hub] Hub tests run in the node environment with their own module
+        // aliases; see vitest.hub.config.js (npm run test:hub).
+        exclude: ['**/node_modules/**', 'src/hub/**'],
         coverage: {
             reporter: ['text', 'text-summary'],
             exclude: [
