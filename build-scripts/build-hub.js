@@ -47,13 +47,7 @@ function build() {
     // identically on the Pi.
     execFileSync(
         process.execPath,
-        [
-            join(rootDir, 'node_modules', 'vite', 'bin', 'vite.js'),
-            'build',
-            'src',
-            '--config',
-            'src/vite.hub.config.js'
-        ],
+        [join(rootDir, 'node_modules', 'vite', 'bin', 'vite.js'), 'build', 'src', '--config', 'src/vite.hub.config.js'],
         { cwd: rootDir, stdio: 'inherit' }
     );
 
