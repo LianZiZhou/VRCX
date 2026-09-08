@@ -35,7 +35,17 @@ import { clearVRCXCache } from '../coordinators/vrcxCoordinator';
 import { resetSearchIndexOnLogin } from '../coordinators/searchIndexCoordinator';
 import { watchState } from '../services/watchState';
 
+// [hub] A mirror client neither owns the schema nor processes Photon events;
+// both belong to the Hub. See src/hub/shared/mode.js.
+import { isMirrorMode } from '../hub/shared/mode.js';
+import { uplinkIpcEvent } from '../hub/client/uplink.js';
+
 import configRepository from '../services/config';
+
+// [hub] Hoisted and exported so a mirror client can compare its expected
+// schema against the Hub's before attaching. A client running against an older
+// Hub schema would silently write malformed rows, so the handshake refuses.
+export const DATABASE_VERSION = 17;
 
 export const useVrcxStore = defineStore('Vrcx', () => {
     const gameStore = useGameStore();
@@ -119,9 +129,16 @@ export const useVrcxStore = defineStore('Vrcx', () => {
             }
 
             state.databaseVersion = await configRepository.getInt('VRCX_databaseVersion', 0);
-            const databaseUpgradeSucceeded = await updateDatabaseVersion();
-            if (!databaseUpgradeSucceeded) {
-                return;
+            // [hub] The Hub owns the schema. upgradeDatabaseVersion() runs
+            // migrations plus VACUUM, and C# holds a single SQLite connection
+            // behind one lock, so several clients migrating the same remote
+            // database means long stalls at best and a migration race at worst.
+            // The handshake has already checked the versions agree.
+            if (!isMirrorMode()) {
+                const databaseUpgradeSucceeded = await updateDatabaseVersion();
+                if (!databaseUpgradeSucceeded) {
+                    return;
+                }
             }
 
             clearVRCXCacheFrequency.value = await configRepository.getInt('VRCX_clearVRCXCacheFrequency', 172800);
@@ -169,7 +186,7 @@ export const useVrcxStore = defineStore('Vrcx', () => {
 
     async function updateDatabaseVersion() {
         // requires dbVars.userPrefix to be already set
-        const databaseVersion = 17;
+        const databaseVersion = DATABASE_VERSION; // [hub]
         if (state.databaseVersion < databaseVersion) {
             databaseUpgradeState.value = {
                 visible: state.databaseVersion > 0,
@@ -371,6 +388,13 @@ export const useVrcxStore = defineStore('Vrcx', () => {
      */
     function ipcEvent(json) {
         if (!watchState.isLoggedIn) {
+            return;
+        }
+        // [hub] Send Photon events up and let the Hub write them once, then
+        // broadcast back to every client. Processing here as well would
+        // duplicate the moderation rows this derives.
+        if (isMirrorMode()) {
+            uplinkIpcEvent(json);
             return;
         }
         let data;
