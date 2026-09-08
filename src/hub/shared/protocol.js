@@ -14,8 +14,12 @@
 export const PROTOCOL_VERSION = 1;
 
 export const FrameType = {
-    /** client -> hub: token + versions */
+    /** client -> hub: versions + client nonce. Cleartext, carries no secret. */
     HELLO: 'hello',
+    /** hub -> client: server nonce. Cleartext; both sides now derive keys. */
+    CHALLENGE: 'challenge',
+    /** client -> hub: sealed proof of token possession. First encrypted frame. */
+    AUTH: 'auth',
     /** hub -> client: accepted, with hub identity and schema version */
     WELCOME: 'welcome',
     /** hub -> client: rejected (bad token, version mismatch) */
@@ -51,6 +55,7 @@ export const EventType = {
 
 export const RejectReason = {
     BAD_TOKEN: 'bad-token',
+    BAD_HANDSHAKE: 'bad-handshake',
     PROTOCOL_MISMATCH: 'protocol-mismatch',
     SCHEMA_MISMATCH: 'schema-mismatch'
 };
