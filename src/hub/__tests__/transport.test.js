@@ -11,6 +11,7 @@ import { createHubConnection, ConnectionState, HubRejectedError } from '../clien
 import { createHubServer } from '../server/wsServer.js';
 import { createInteropHandler } from '../server/interopHandler.js';
 import { EventType, PROTOCOL_VERSION, RejectReason } from '../shared/protocol.js';
+import { buildAuthProof, createOpener, createSealer, deriveChannelKeys, randomNonce } from '../shared/secureChannel.js';
 import { withRequestCoalescing } from '../server/requestCoalescer.js';
 
 const TOKEN = 'test-token-0123456789';
@@ -110,7 +111,7 @@ describe('hub transport over a real socket', () => {
                 raw.send(
                     JSON.stringify({
                         t: 'hello',
-                        p: { token: TOKEN, protocol: PROTOCOL_VERSION + 99, client: 'x' }
+                        p: { protocol: PROTOCOL_VERSION + 99, client: 'x', clientNonce: randomNonce() }
                     })
                 );
             };
@@ -133,7 +134,7 @@ describe('hub transport over a real socket', () => {
         raw.close();
 
         expect(rejection.t).toBe('reject');
-        expect(rejection.p.reason).toBe(RejectReason.BAD_TOKEN);
+        expect(rejection.p.reason).toBe(RejectReason.BAD_HANDSHAKE);
     });
 
     it('broadcasts events to every connected client', async () => {
@@ -200,6 +201,86 @@ describe('hub transport over a real socket', () => {
 
         await expect(inFlight).rejects.toThrow(/closed/i);
         release();
+    });
+
+    it('encrypts everything after the handshake', async () => {
+        // Drive the handshake by hand so we can inspect the raw wire bytes.
+        const raw = new WebSocket(url);
+        raw.binaryType = 'arraybuffer';
+        const clientNonce = randomNonce();
+        const frames = [];
+
+        const serverNonce = await new Promise((resolve) => {
+            raw.onopen = () => {
+                raw.send(
+                    JSON.stringify({
+                        t: 'hello',
+                        p: { protocol: PROTOCOL_VERSION, client: 'probe', clientNonce }
+                    })
+                );
+            };
+            raw.onmessage = (message) => {
+                frames.push(message.data);
+                resolve(JSON.parse(message.data).p.serverNonce);
+            };
+        });
+
+        const keys = await deriveChannelKeys(TOKEN, clientNonce, serverNonce);
+        const sealed = await new Promise((resolve) => {
+            raw.onmessage = (message) => resolve(message.data);
+            createSealer(keys.clientToServer)
+                .seal({ t: 'auth', p: buildAuthProof(clientNonce, serverNonce) })
+                .then((bytes) => raw.send(bytes));
+        });
+
+        // The welcome frame is binary, and its plaintext is nowhere in it.
+        expect(sealed).toBeInstanceOf(ArrayBuffer);
+        const asText = new TextDecoder().decode(new Uint8Array(sealed));
+        expect(asText).not.toContain('databaseVersion');
+        expect(asText).not.toContain('test-hub');
+
+        // It does decrypt with the right key.
+        const welcome = await createOpener(keys.serverToClient).open(sealed);
+        expect(welcome.t).toBe('welcome');
+        expect(welcome.p.databaseVersion).toBe(17);
+        raw.close();
+    });
+
+    it('drops a client that sends plaintext on an established channel', async () => {
+        client = createHubConnection({ url, token: TOKEN, autoReconnect: false });
+        await client.connect();
+        expect(server.clientCount).toBe(1);
+
+        // Reach past the connection wrapper to inject an unencrypted frame.
+        const raw = new WebSocket(url);
+        raw.binaryType = 'arraybuffer';
+        const clientNonce = randomNonce();
+        const serverNonce = await new Promise((resolve) => {
+            raw.onopen = () => {
+                raw.send(
+                    JSON.stringify({
+                        t: 'hello',
+                        p: { protocol: PROTOCOL_VERSION, client: 'probe', clientNonce }
+                    })
+                );
+            };
+            raw.onmessage = (message) => resolve(JSON.parse(message.data).p.serverNonce);
+        });
+        const keys = await deriveChannelKeys(TOKEN, clientNonce, serverNonce);
+        await new Promise((resolve) => {
+            raw.onmessage = () => resolve();
+            createSealer(keys.clientToServer)
+                .seal({ t: 'auth', p: buildAuthProof(clientNonce, serverNonce) })
+                .then((bytes) => raw.send(bytes));
+        });
+        await vi.waitFor(() => expect(server.clientCount).toBe(2));
+
+        const closed = new Promise((resolve) => {
+            raw.onclose = resolve;
+        });
+        raw.send(JSON.stringify({ i: 1, t: 'call', p: { c: 'SQLite', m: 'Execute', a: [] } }));
+        await closed;
+        await vi.waitFor(() => expect(server.clientCount).toBe(1));
     });
 
     it('refuses to start without a token', () => {

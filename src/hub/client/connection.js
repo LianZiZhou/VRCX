@@ -2,18 +2,34 @@
  * [hub] Mirror-client side of the Hub link.
  *
  * Runs inside the VRCX renderer (CefSharp or Electron) and, in tests, in Node.
- * All three provide a global `WebSocket`, so this module uses that rather than
- * any Node-specific socket library — nothing here may pull in a Node builtin.
+ * All three provide a global `WebSocket` and Web Crypto, so this module uses
+ * those rather than any Node-specific library — nothing here may pull in a Node
+ * builtin, or it would break the browser bundle.
  *
- * The URL scheme is deliberately not this module's concern: `ws://` and
- * `wss://` behave identically here. How the client comes to trust the Hub's
- * certificate is a deployment question, handled outside this file.
+ * Handshake (see `shared/secureChannel.js` for why it is done this way):
+ *
+ *   -> hello      plaintext, protocol version + our random nonce
+ *   <- challenge  plaintext, the Hub's random nonce
+ *      ...both sides now derive per-direction AES-GCM keys from the token...
+ *   -> auth       sealed; being able to produce it is the proof we hold the token
+ *   <- welcome    sealed; Hub identity and database schema version
+ *
+ * After that every frame in both directions is sealed.
  */
 
 import { decodeFrame, encodeFrame, FrameType, PROTOCOL_VERSION } from '../shared/protocol.js';
+import {
+    buildAuthProof,
+    ChannelSecurityError,
+    createOpener,
+    createSealer,
+    deriveChannelKeys,
+    randomNonce
+} from '../shared/secureChannel.js';
 
 /** How long a single interop call may take before it is abandoned. */
 const CALL_TIMEOUT_MS = 30000;
+const HANDSHAKE_TIMEOUT_MS = 15000;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 
@@ -67,11 +83,16 @@ export function createHubConnection(options) {
     let seq = 0;
     let reconnectAttempts = 0;
     let reconnectTimer = null;
+    let handshakeTimer = null;
     let closedByUs = false;
+
+    let sealer = null;
+    let opener = null;
+    let clientNonce = null;
 
     /** @type {Map<number, {resolve: Function, reject: Function, timer: any}>} */
     const pending = new Map();
-    /** Resolved once the current connection attempt reaches `welcome`. */
+    /** Resolved once the current attempt reaches `welcome`. */
     let handshake = null;
     let welcomeInfo = null;
 
@@ -85,8 +106,8 @@ export function createHubConnection(options) {
     }
 
     /**
-     * Fail every in-flight call. Called whenever the socket goes away: leaving
-     * them pending would hang the UI on a dead link.
+     * Fail every in-flight call. Leaving them pending would hang the UI on a
+     * dead link.
      *
      * @param {Error} error
      */
@@ -98,6 +119,13 @@ export function createHubConnection(options) {
         pending.clear();
     }
 
+    function clearHandshakeTimer() {
+        if (handshakeTimer) {
+            clearTimeout(handshakeTimer);
+            handshakeTimer = null;
+        }
+    }
+
     function scheduleReconnect() {
         if (!autoReconnect || closedByUs || reconnectTimer) {
             return;
@@ -107,41 +135,81 @@ export function createHubConnection(options) {
         reconnectTimer = setTimeout(() => {
             reconnectTimer = null;
             connect().catch(() => {
-                // connect() already reported the failure through onStateChange.
+                // connect() already reported this through onStateChange.
             });
         }, delay);
     }
 
     /**
-     * @param {MessageEvent} message
+     * @param {object} frame
+     * @returns {Promise<void>}
      */
-    function handleMessage(message) {
+    async function sendSealed(frame) {
+        if (!socket || !sealer) {
+            throw new Error('Hub channel is not established');
+        }
+        socket.send(await sealer.seal(frame));
+    }
+
+    /**
+     * Plaintext handshake frames. Only `challenge` and `reject` are accepted
+     * here; anything else means the Hub is not speaking our protocol.
+     *
+     * @param {string} data
+     */
+    async function handlePlaintext(data) {
         let frame;
         try {
-            frame = decodeFrame(message.data);
+            frame = decodeFrame(data);
         } catch {
             return;
         }
+
+        if (frame.t === FrameType.REJECT) {
+            const error = new HubRejectedError(frame.p?.reason ?? 'unknown');
+            clearHandshakeTimer();
+            setState(ConnectionState.REJECTED, error);
+            handshake?.reject(error);
+            handshake = null;
+            // A rejection is a configuration problem (wrong token, version
+            // mismatch). Retrying on a timer would just hammer the Hub.
+            closedByUs = true;
+            return;
+        }
+
+        if (frame.t !== FrameType.CHALLENGE || typeof frame.p?.serverNonce !== 'string') {
+            return;
+        }
+        if (sealer) {
+            // A second challenge on an established channel is not legitimate.
+            throw new ChannelSecurityError('Unexpected challenge frame');
+        }
+
+        const serverNonce = frame.p.serverNonce;
+        const keys = await deriveChannelKeys(token, clientNonce, serverNonce);
+        sealer = createSealer(keys.clientToServer);
+        opener = createOpener(keys.serverToClient);
+        await sendSealed({ t: FrameType.AUTH, p: buildAuthProof(clientNonce, serverNonce) });
+    }
+
+    /**
+     * @param {ArrayBuffer} data
+     */
+    async function handleSealed(data) {
+        if (!opener) {
+            throw new ChannelSecurityError('Sealed frame before the channel was established');
+        }
+        const frame = await opener.open(data);
 
         switch (frame.t) {
             case FrameType.WELCOME:
                 welcomeInfo = frame.p ?? {};
                 reconnectAttempts = 0;
+                clearHandshakeTimer();
                 setState(ConnectionState.READY, welcomeInfo);
                 handshake?.resolve(welcomeInfo);
                 handshake = null;
                 break;
-
-            case FrameType.REJECT: {
-                const error = new HubRejectedError(frame.p?.reason ?? 'unknown');
-                setState(ConnectionState.REJECTED, error);
-                handshake?.reject(error);
-                handshake = null;
-                // A rejection is a configuration problem (bad token, version
-                // mismatch). Retrying on a timer would just hammer the Hub.
-                closedByUs = true;
-                break;
-            }
 
             case FrameType.RESULT: {
                 const entry = pending.get(frame.i);
@@ -182,6 +250,9 @@ export function createHubConnection(options) {
             return handshake?.promise ?? Promise.resolve(welcomeInfo);
         }
         closedByUs = false;
+        sealer = null;
+        opener = null;
+        clientNonce = randomNonce();
         setState(ConnectionState.CONNECTING);
 
         let resolve;
@@ -193,17 +264,39 @@ export function createHubConnection(options) {
         handshake = { promise, resolve, reject };
 
         socket = new WebSocketImpl(url);
+        socket.binaryType = 'arraybuffer';
+
+        handshakeTimer = setTimeout(() => {
+            handshakeTimer = null;
+            // A Hub that accepts the socket but never completes the handshake
+            // would otherwise leave the client waiting forever.
+            socket?.close(4008, 'handshake-timeout');
+        }, HANDSHAKE_TIMEOUT_MS);
 
         socket.onopen = () => {
             socket.send(
                 encodeFrame({
                     t: FrameType.HELLO,
-                    p: { token, protocol: PROTOCOL_VERSION, client: clientName }
+                    p: { protocol: PROTOCOL_VERSION, client: clientName, clientNonce }
                 })
             );
         };
 
-        socket.onmessage = handleMessage;
+        socket.onmessage = (message) => {
+            const handler =
+                typeof message.data === 'string' ? handlePlaintext(message.data) : handleSealed(message.data);
+            handler.catch((err) => {
+                if (err instanceof ChannelSecurityError) {
+                    setState(ConnectionState.REJECTED, err);
+                    handshake?.reject(err);
+                    handshake = null;
+                    closedByUs = true;
+                    socket?.close(4009, 'channel-security');
+                    return;
+                }
+                console.error('[hub] Failed to process a frame:', err);
+            });
+        };
 
         socket.onerror = () => {
             // `onclose` always follows; do the teardown there so it happens once.
@@ -211,6 +304,9 @@ export function createHubConnection(options) {
 
         socket.onclose = () => {
             socket = null;
+            sealer = null;
+            opener = null;
+            clearHandshakeTimer();
             const wasReady = state === ConnectionState.READY;
             if (state !== ConnectionState.REJECTED) {
                 setState(ConnectionState.CLOSED);
@@ -259,7 +355,11 @@ export function createHubConnection(options) {
                     reject(new Error(`Hub call timed out: ${className}.${method}`));
                 }, CALL_TIMEOUT_MS);
                 pending.set(id, { resolve, reject, timer });
-                socket.send(encodeFrame({ i: id, t: FrameType.CALL, p: { c: className, m: method, a: args } }));
+                sendSealed({ i: id, t: FrameType.CALL, p: { c: className, m: method, a: args } }).catch((err) => {
+                    pending.delete(id);
+                    clearTimeout(timer);
+                    reject(err);
+                });
             });
         },
 
@@ -270,12 +370,17 @@ export function createHubConnection(options) {
          *
          * @param {string} kind
          * @param {any} data
+         * @returns {Promise<void>}
          */
-        uplink(kind, data) {
+        async uplink(kind, data) {
             if (state !== ConnectionState.READY || !socket) {
                 return;
             }
-            socket.send(encodeFrame({ t: FrameType.UPLINK, p: { kind, data } }));
+            try {
+                await sendSealed({ t: FrameType.UPLINK, p: { kind, data } });
+            } catch (err) {
+                console.error('[hub] Failed to uplink:', err);
+            }
         },
 
         close() {
@@ -284,9 +389,12 @@ export function createHubConnection(options) {
                 clearTimeout(reconnectTimer);
                 reconnectTimer = null;
             }
+            clearHandshakeTimer();
             failPending(new Error('Hub connection closed by client'));
             socket?.close(1000, 'client-shutdown');
             socket = null;
+            sealer = null;
+            opener = null;
             setState(ConnectionState.CLOSED);
         }
     };
