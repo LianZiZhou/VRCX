@@ -53,7 +53,6 @@ describe('derived write list', () => {
             'deleteNotificationV2',
             'seenNotificationV2',
             'deleteFriendLogHistory',
-            'setModeration',
             'clearAvatarHistory'
         ]) {
             expect(suppressed.has(name), `"${name}" is user-initiated and must not be suppressed`).toBe(false);
@@ -70,6 +69,9 @@ describe('derived write list', () => {
         expect(DERIVED_WRITES.has('addAvatarToCache')).toBe(false);
         // Migrations plus VACUUM on a shared single-connection DB.
         expect(SCHEMA_WRITES.has('upgradeDatabaseVersion')).toBe(true);
+        // Photon-derived: only stores/photon.js writes these, and Photon
+        // reaches the Hub through the client uplink.
+        expect(DERIVED_WRITES.has('setModeration')).toBe(true);
     });
 });
 
