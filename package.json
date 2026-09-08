@@ -96,6 +96,7 @@
         "pinia": "^4.0.2",
         "reka-ui": "^2.10.1",
         "remixicon": "^4.9.1",
+        "selfsigned": "^5.5.0",
         "sigma": "^3.0.3",
         "tailwind-merge": "^3.6.0",
         "tailwindcss": "^4.3.3",
@@ -116,6 +117,7 @@
         "vue-tsc": "^3.3.8",
         "vue3-colorpicker": "^2.3.0",
         "worker-timers": "^8.0.34",
+        "ws": "^8.21.3",
         "yargs": "^18.1.0",
         "zod": "^3.25.76"
     },
