@@ -1,0 +1,61 @@
+# [hub] VRCX Hub - headless VRCX backend.
+#
+# Builds for the host architecture; on a Raspberry Pi that is arm64. Build from
+# the repository root:
+#
+#   docker build -f docker/Dockerfile.hub -t vrcx-hub .
+#   docker run -d --name vrcx-hub \
+#     -p 9001:9001 -p 9002:9002 \
+#     -v vrcx-hub-data:/data \
+#     vrcx-hub
+#
+# The token is generated on first run into /data/hub-token. Read it with:
+#   docker exec vrcx-hub cat /data/hub-token
+
+# --- .NET runtime -------------------------------------------------------------
+# VRCX's SQLite and HTTP layers are C#, loaded through node-api-dotnet. Taking
+# the runtime from Microsoft's image is more reliable than installing it by hand
+# and gives the same result on amd64 and arm64.
+FROM mcr.microsoft.com/dotnet/runtime:10.0-bookworm-slim AS dotnet
+
+# --- build --------------------------------------------------------------------
+FROM node:24-bookworm-slim AS build
+WORKDIR /src
+
+COPY package.json package-lock.json .npmrc ./
+RUN npm ci --engine-strict=false --no-audit --no-fund
+
+COPY Version ./Version
+COPY src ./src
+COPY build-scripts ./build-scripts
+RUN node ./build-scripts/build-hub.js
+
+# --- runtime ------------------------------------------------------------------
+FROM node:24-bookworm-slim
+WORKDIR /app
+
+COPY --from=dotnet /usr/share/dotnet /usr/share/dotnet
+ENV DOTNET_ROOT=/usr/share/dotnet
+ENV PATH="/usr/share/dotnet:${PATH}"
+# .NET needs ICU for globalisation; without it it refuses to start.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libicu72 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /src/build/hub ./
+RUN npm install --omit=dev --engine-strict=false --no-audit --no-fund
+
+# The compiled VRCX .NET assemblies. Built separately with
+#   dotnet publish Dotnet/VRCX-Electron-arm64.csproj -c Release
+# and expected at build/Electron/ relative to the working directory.
+COPY build/Electron ./build/Electron
+
+ENV VRCX_HUB_DATA=/data
+VOLUME ["/data"]
+EXPOSE 9001 9002
+
+# Run as the node image's unprivileged user; the Hub needs no root.
+RUN mkdir -p /data && chown -R node:node /data /app
+USER node
+
+CMD ["node", "main.js", "--host=0.0.0.0"]
