@@ -4,46 +4,47 @@
  * Server-only module: it imports Node builtins and `ws`, so it must never end
  * up in the client import graph. Clients only ever reach for `hub/shared/**`
  * and `hub/client/**`.
+ *
+ * Every connection runs the pre-shared-key handshake from
+ * `shared/secureChannel.js`. Only the first two frames are plaintext, and they
+ * carry nothing but a protocol version and a random nonce. Everything after
+ * that is AES-GCM sealed, and a plaintext frame arriving on an established
+ * connection is treated as an attack and closes it.
  */
 
 import { createServer as createHttpServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
-import { timingSafeEqual } from 'node:crypto';
-import { Buffer } from 'node:buffer';
 
 import { WebSocketServer } from 'ws';
 
 import { decodeFrame, encodeFrame, FrameType, PROTOCOL_VERSION, RejectReason } from '../shared/protocol.js';
+import {
+    ChannelSecurityError,
+    createOpener,
+    createSealer,
+    deriveChannelKeys,
+    isValidAuthProof,
+    randomNonce
+} from '../shared/secureChannel.js';
 
 const HEARTBEAT_MS = 30000;
 
-/**
- * Constant-time token comparison. The token is a shared secret on a LAN, but
- * comparing it with `===` leaks its length and prefix to anything that can
- * reach the port.
- *
- * @param {string} a
- * @param {string} b
- * @returns {boolean}
- */
-function tokensMatch(a, b) {
-    const left = Buffer.from(String(a ?? ''), 'utf8');
-    const right = Buffer.from(String(b ?? ''), 'utf8');
-    if (left.length !== right.length || left.length === 0) {
-        return false;
-    }
-    return timingSafeEqual(left, right);
-}
+const Phase = {
+    AWAITING_HELLO: 'awaiting-hello',
+    AWAITING_AUTH: 'awaiting-auth',
+    READY: 'ready'
+};
 
 /**
  * @typedef {object} HubServerOptions
  * @property {number} port
  * @property {string} [host]
- * @property {string} token - shared secret every client must present
- * @property {{ key: string, cert: string }} [tls] - omit for a plain ws:// listener
+ * @property {string} token - the pre-shared secret; never sent over the wire
+ * @property {{ key: string, cert: string }} [tls] - optional TLS on top of the AEAD
  * @property {(className: string, method: string, args: any[]) => Promise<any>} handleCall
  * @property {(kind: string, data: any, client: object) => void} [onUplink]
  * @property {() => object} [describe] - extra fields for the `welcome` frame
+ * @property {(message: string, detail?: any) => void} [log]
  */
 
 /**
@@ -57,7 +58,8 @@ export function createHubServer(options) {
         tls = null,
         handleCall,
         onUplink = () => {},
-        describe = () => ({})
+        describe = () => ({}),
+        log = () => {}
     } = options;
 
     if (!token) {
@@ -73,104 +75,176 @@ export function createHubServer(options) {
 
     /**
      * @param {import('ws').WebSocket} socket
-     * @param {object} frame
+     * @param {string} reason
      */
-    function send(socket, frame) {
-        if (socket.readyState === socket.OPEN) {
-            socket.send(encodeFrame(frame));
+    function reject(socket, reason) {
+        try {
+            socket.send(encodeFrame({ t: FrameType.REJECT, p: { reason } }));
+        } catch {
+            // The socket may already be gone; closing is what matters.
         }
+        socket.close(4001, reason);
     }
 
     /**
      * @param {import('ws').WebSocket} socket
-     * @param {string} reason
+     * @param {object} frame
+     * @returns {Promise<void>}
      */
-    function reject(socket, reason) {
-        send(socket, { t: FrameType.REJECT, p: { reason } });
-        socket.close(4001, reason);
+    async function sendSealed(socket, frame) {
+        if (socket.readyState !== socket.OPEN || !socket.sealer) {
+            return;
+        }
+        try {
+            socket.send(await socket.sealer.seal(frame), { binary: true });
+        } catch (err) {
+            log('Failed to send sealed frame', err);
+        }
+    }
+
+    /**
+     * Step 1. Plaintext, carries only a protocol version and the client nonce.
+     */
+    async function handleHello(socket, raw, isBinary) {
+        if (isBinary) {
+            reject(socket, RejectReason.BAD_HANDSHAKE);
+            return;
+        }
+        let frame;
+        try {
+            frame = decodeFrame(raw);
+        } catch {
+            reject(socket, RejectReason.BAD_HANDSHAKE);
+            return;
+        }
+        if (frame.t !== FrameType.HELLO) {
+            reject(socket, RejectReason.BAD_HANDSHAKE);
+            return;
+        }
+        if (frame.p?.protocol !== PROTOCOL_VERSION) {
+            reject(socket, RejectReason.PROTOCOL_MISMATCH);
+            return;
+        }
+        const clientNonce = frame.p?.clientNonce;
+        if (typeof clientNonce !== 'string' || clientNonce.length < 16) {
+            reject(socket, RejectReason.BAD_HANDSHAKE);
+            return;
+        }
+
+        const serverNonce = randomNonce();
+        const keys = await deriveChannelKeys(token, clientNonce, serverNonce);
+        socket.clientNonce = clientNonce;
+        socket.serverNonce = serverNonce;
+        socket.sealer = createSealer(keys.serverToClient);
+        socket.opener = createOpener(keys.clientToServer);
+        socket.clientName = String(frame.p?.client ?? 'unknown');
+        socket.phase = Phase.AWAITING_AUTH;
+
+        socket.send(encodeFrame({ t: FrameType.CHALLENGE, p: { serverNonce } }));
+    }
+
+    /**
+     * Step 2. The first sealed frame. Being able to open it at all is the proof
+     * that the client holds the token, so there is no secret to compare here.
+     */
+    async function handleAuth(socket, raw, isBinary) {
+        if (!isBinary) {
+            reject(socket, RejectReason.BAD_HANDSHAKE);
+            return;
+        }
+        const frame = await socket.opener.open(raw);
+        const proofValid = isValidAuthProof(frame.p, socket.clientNonce, socket.serverNonce);
+        if (frame.t !== FrameType.AUTH || !proofValid) {
+            reject(socket, RejectReason.BAD_HANDSHAKE);
+            return;
+        }
+
+        socket.phase = Phase.READY;
+        clients.add(socket);
+        log(`Client connected: ${socket.clientName} (${socket.remoteLabel})`);
+        await sendSealed(socket, {
+            t: FrameType.WELCOME,
+            p: { protocol: PROTOCOL_VERSION, ...describe() }
+        });
+    }
+
+    /**
+     * Steady state. Plaintext is no longer acceptable: allowing it would let
+     * anyone who can reach the port inject unauthenticated frames.
+     */
+    async function handleSealed(socket, raw, isBinary) {
+        if (!isBinary) {
+            throw new ChannelSecurityError('Plaintext frame on an established channel');
+        }
+        const frame = await socket.opener.open(raw);
+
+        switch (frame.t) {
+            case FrameType.CALL: {
+                const { c, m, a } = frame.p ?? {};
+                try {
+                    const value = await handleCall(c, m, a ?? []);
+                    await sendSealed(socket, { i: frame.i, t: FrameType.RESULT, p: value });
+                } catch (err) {
+                    await sendSealed(socket, {
+                        i: frame.i,
+                        t: FrameType.ERROR,
+                        p: {
+                            message: err instanceof Error ? err.message : String(err),
+                            code: err?.code ?? 'interop-error'
+                        }
+                    });
+                }
+                break;
+            }
+
+            case FrameType.UPLINK:
+                onUplink(frame.p?.kind, frame.p?.data, socket);
+                break;
+
+            case FrameType.PING:
+                await sendSealed(socket, { i: frame.i, t: FrameType.PONG });
+                break;
+
+            default:
+                break;
+        }
     }
 
     wss.on('connection', (socket, request) => {
-        socket.isAuthenticated = false;
+        socket.phase = Phase.AWAITING_HELLO;
         socket.isAlive = true;
         socket.remoteLabel = request.socket.remoteAddress ?? 'unknown';
+        socket.sealer = null;
+        socket.opener = null;
 
         socket.on('pong', () => {
             socket.isAlive = true;
         });
 
-        socket.on('message', async (raw) => {
-            let frame;
+        socket.on('message', async (raw, isBinary) => {
             try {
-                frame = decodeFrame(raw);
-            } catch {
-                reject(socket, 'malformed-frame');
-                return;
-            }
-
-            if (!socket.isAuthenticated) {
-                // Nothing but `hello` is accepted before the handshake.
-                if (frame.t !== FrameType.HELLO) {
+                if (socket.phase === Phase.AWAITING_HELLO) {
+                    await handleHello(socket, raw, isBinary);
+                } else if (socket.phase === Phase.AWAITING_AUTH) {
+                    await handleAuth(socket, raw, isBinary);
+                } else {
+                    await handleSealed(socket, raw, isBinary);
+                }
+            } catch (err) {
+                if (err instanceof ChannelSecurityError) {
+                    log(`Channel security failure from ${socket.remoteLabel}`, err.message);
+                    clients.delete(socket);
                     reject(socket, RejectReason.BAD_TOKEN);
                     return;
                 }
-                if (!tokensMatch(frame.p?.token, token)) {
-                    reject(socket, RejectReason.BAD_TOKEN);
-                    return;
-                }
-                if (frame.p?.protocol !== PROTOCOL_VERSION) {
-                    reject(socket, RejectReason.PROTOCOL_MISMATCH);
-                    return;
-                }
-                socket.isAuthenticated = true;
-                socket.clientName = String(frame.p?.client ?? 'unknown');
-                clients.add(socket);
-                send(socket, {
-                    t: FrameType.WELCOME,
-                    p: { protocol: PROTOCOL_VERSION, ...describe() }
-                });
-                return;
-            }
-
-            switch (frame.t) {
-                case FrameType.CALL: {
-                    const { c, m, a } = frame.p ?? {};
-                    try {
-                        const value = await handleCall(c, m, a ?? []);
-                        send(socket, { i: frame.i, t: FrameType.RESULT, p: value });
-                    } catch (err) {
-                        send(socket, {
-                            i: frame.i,
-                            t: FrameType.ERROR,
-                            p: {
-                                message: err instanceof Error ? err.message : String(err),
-                                code: err?.code ?? 'interop-error'
-                            }
-                        });
-                    }
-                    break;
-                }
-
-                case FrameType.UPLINK:
-                    onUplink(frame.p?.kind, frame.p?.data, socket);
-                    break;
-
-                case FrameType.PING:
-                    send(socket, { i: frame.i, t: FrameType.PONG });
-                    break;
-
-                default:
-                    break;
+                log('Unhandled error while processing a hub frame', err);
+                clients.delete(socket);
+                socket.close(1011, 'internal-error');
             }
         });
 
-        socket.on('close', () => {
-            clients.delete(socket);
-        });
-
-        socket.on('error', () => {
-            clients.delete(socket);
-        });
+        socket.on('close', () => clients.delete(socket));
+        socket.on('error', () => clients.delete(socket));
     });
 
     return {
@@ -215,20 +289,19 @@ export function createHubServer(options) {
         /**
          * Push an event to every authenticated client.
          *
+         * Each client has its own key and counter, so unlike a plaintext design
+         * this cannot share one encoded buffer across sockets.
+         *
          * @param {string} event - one of `EventType`
          * @param {any} payload
          * @param {{ except?: object }} [opts]
+         * @returns {Promise<void>}
          */
-        broadcast(event, payload, opts = {}) {
-            const frame = encodeFrame({ t: FrameType.EVENT, p: { event, data: payload } });
-            for (const socket of clients) {
-                if (socket === opts.except) {
-                    continue;
-                }
-                if (socket.readyState === socket.OPEN) {
-                    socket.send(frame);
-                }
-            }
+        async broadcast(event, payload, opts = {}) {
+            const frame = { t: FrameType.EVENT, p: { event, data: payload } };
+            await Promise.all(
+                [...clients].filter((socket) => socket !== opts.except).map((socket) => sendSealed(socket, frame))
+            );
         },
 
         /** @returns {number} */
@@ -236,7 +309,7 @@ export function createHubServer(options) {
             return clients.size;
         },
 
-        /** @returns {number} the port actually bound (useful when port is 0) */
+        /** @returns {object} the bound address (useful when port is 0) */
         get address() {
             return httpServer.address();
         }
