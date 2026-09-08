@@ -38,11 +38,11 @@ so instead the Hub boots the real store graph headlessly.
 
 ### Three run modes
 
-| Mode | Where | Native bindings | Pipeline socket | Derived writes |
-|---|---|---|---|---|
-| `standalone` | today's VRCX, and the offline fallback | all local | its own | its own |
-| `hub` | the always-on box | all local | **the only one** | its own |
-| `mirror` | a client attached to a Hub | `SQLite`/`WebApi` remote, rest local | none — relayed | suppressed |
+| Mode         | Where                                  | Native bindings                      | Pipeline socket  | Derived writes |
+| ------------ | -------------------------------------- | ------------------------------------ | ---------------- | -------------- |
+| `standalone` | today's VRCX, and the offline fallback | all local                            | its own          | its own        |
+| `hub`        | the always-on box                      | all local                            | **the only one** | its own        |
+| `mirror`     | a client attached to a Hub             | `SQLite`/`WebApi` remote, rest local | none — relayed   | suppressed     |
 
 `VRCXStorage` deliberately stays local in mirror mode. It backs `VRCX.json`,
 which holds per-machine things — window geometry, GPU flags, database path,
@@ -60,7 +60,7 @@ follow the database to the Hub, which is the intended behaviour.
 - Node 24+
 - The .NET 10 runtime
 - VRCX's .NET assemblies built for the target: `dotnet publish
-  Dotnet/VRCX-Electron-arm64.csproj -c Release`, giving `build/Electron/`
+Dotnet/VRCX-Electron-arm64.csproj -c Release`, giving `build/Electron/`
 
 ### Build and run
 
@@ -106,9 +106,9 @@ above):
 
 ```json
 {
-  "VRCX_HubEnabled": "true",
-  "VRCX_HubUrl": "ws://192.168.1.50:9001",
-  "VRCX_HubToken": "<the token from the Hub>"
+    "VRCX_HubEnabled": "true",
+    "VRCX_HubUrl": "ws://192.168.1.50:9001",
+    "VRCX_HubToken": "<the token from the Hub>"
 }
 ```
 
@@ -136,7 +136,7 @@ That is not a shortcut. A mirror client's socket is created in the VRCX renderer
 with the browser `WebSocket` API; browsers refuse `wss://` to a self-signed
 certificate and give JavaScript no way to inspect or pin a fingerprint, so
 trust-on-first-use cannot be implemented where it would need to live. Doing it
-at the host layer would mean patching `src-electron/main.js` *and* the CefSharp
+at the host layer would mean patching `src-electron/main.js` _and_ the CefSharp
 request handler in `Dotnet/` — exactly the kind of upstream surface this fork is
 trying not to grow.
 
@@ -196,9 +196,18 @@ swapping the database underneath a running app — the two databases hold
 different content and different per-user table prefixes.
 
 **Data written offline diverges.** A client running standalone writes to its own
-local database. Nothing merges that back automatically. The repository ships
-`Dotnet/DBMerger`, a standalone CLI for merging two VRCX databases, which is the
-tool for the job.
+local database, and nothing merges that back on its own. To fold it in, copy the
+client's `VRCX.sqlite3` to the Hub machine, stop the Hub, and run:
+
+```bash
+npm run hub-merge-offline -- --client-db=/tmp/offline-VRCX.sqlite3
+```
+
+That wraps `Dotnet/DBMerger` (build it with `dotnet publish
+Dotnet/DBMerger/DBMerger.csproj -c Release -r linux-arm64`). It refuses to run
+while the Hub is listening — DBMerger opens both files directly and would race
+the Hub's writes — and it always takes a timestamped backup of the Hub database
+into `backups/` before touching anything.
 
 ---
 
@@ -222,14 +231,14 @@ the shim does not cover.
 Everything else is new files. The upstream tree is touched in seven places, each
 a small guarded block marked `// [hub]`:
 
-| File | What |
-|---|---|
-| `src/plugins/interopApi.js` | attempt the Hub, rebind `SQLite`/`WebApi` |
-| `src/services/database/index.js` | wrap the export in the suppression proxy |
-| `src/services/websocket.js` | relay pipeline messages; mirrors do not connect |
-| `src/stores/updateLoop.js` | gate timers by mode; uplink instead of processing |
-| `src/stores/vrcx.js` | Hub owns the schema; uplink Photon events |
-| `vitest.config.js` | exclude the Hub suite (it has its own config) |
-| `package.json` | two scripts, four dev dependencies |
+| File                             | What                                              |
+| -------------------------------- | ------------------------------------------------- |
+| `src/plugins/interopApi.js`      | attempt the Hub, rebind `SQLite`/`WebApi`         |
+| `src/services/database/index.js` | wrap the export in the suppression proxy          |
+| `src/services/websocket.js`      | relay pipeline messages; mirrors do not connect   |
+| `src/stores/updateLoop.js`       | gate timers by mode; uplink instead of processing |
+| `src/stores/vrcx.js`             | Hub owns the schema; uplink Photon events         |
+| `vitest.config.js`               | exclude the Hub suite (it has its own config)     |
+| `package.json`                   | two scripts, four dev dependencies                |
 
 `git log -S'[hub]'` finds all of them. `Dotnet/` is untouched.
