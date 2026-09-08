@@ -16,12 +16,11 @@
  * `build/Electron/` relative to wherever the Hub is run from.
  */
 
-import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+const { execFileSync } = require('node:child_process');
+const { readFileSync, writeFileSync } = require('node:fs');
+const { join, resolve } = require('node:path');
 
-const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const rootDir = resolve(__dirname, '..');
 const outDir = join(rootDir, 'build', 'hub');
 
 /** Dependencies the bundle keeps external; see `src/vite.hub.config.js`. */
