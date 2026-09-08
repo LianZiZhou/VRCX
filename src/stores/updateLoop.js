@@ -22,6 +22,12 @@ import { useVrStore } from './vr';
 import { useVrcxStore } from './vrcx';
 import { watchState } from '../services/watchState';
 
+// [hub] Timer ownership differs by run mode: the Hub drives the data-owning
+// refreshes, a mirror client uplinks its local-machine data instead of
+// processing it. See src/hub/shared/mode.js.
+import { isHubMode, isMirrorMode } from '../hub/shared/mode.js';
+import { uplinkGameLogLines, uplinkGameState } from '../hub/client/uplink.js';
+
 import * as workerTimers from 'worker-timers';
 
 export const useUpdateLoopStore = defineStore('UpdateLoop', () => {
@@ -97,10 +103,14 @@ export const useUpdateLoopStore = defineStore('UpdateLoop', () => {
                 }
                 if (--state.nextAppUpdateCheck <= 0) {
                     state.nextAppUpdateCheck = 3600; // 1hour
-                    if (vrcxUpdaterStore.autoUpdateVRCX !== 'Off') {
-                        vrcxUpdaterStore.checkForVRCXUpdate();
+                    // [hub] Updating the desktop app and backing up VRChat's
+                    // registry are client concerns; a Hub box has neither.
+                    if (!isHubMode()) {
+                        if (vrcxUpdaterStore.autoUpdateVRCX !== 'Off') {
+                            vrcxUpdaterStore.checkForVRCXUpdate();
+                        }
+                        vrcxStore.tryAutoBackupVrcRegistry();
                     }
-                    vrcxStore.tryAutoBackupVrcRegistry();
                 }
                 if (--state.ipcTimeout <= 0) {
                     vrcxStore.setIpcEnabled(false);
@@ -123,21 +133,33 @@ export const useUpdateLoopStore = defineStore('UpdateLoop', () => {
                     state.nextAutoStateChange = 3;
                     updateAutoStateChange();
                 }
-                if (LINUX && --state.nextGetLogCheck <= 0) {
+                if (LINUX && !isHubMode() && --state.nextGetLogCheck <= 0) {
+                    // [hub] The Hub has no VRChat install to tail; its game log
+                    // arrives from clients over the uplink.
                     state.nextGetLogCheck = 0.5;
                     const logLines = await LogWatcher.GetLogLines();
-                    if (logLines) {
-                        logLines.forEach((logLine) => {
-                            addGameLogEvent(logLine);
-                        });
+                    if (logLines?.length) {
+                        if (isMirrorMode()) {
+                            // [hub] Send up and let the Hub write once, then
+                            // broadcast back; processing here too would double.
+                            uplinkGameLogLines(logLines);
+                        } else {
+                            logLines.forEach((logLine) => {
+                                addGameLogEvent(logLine);
+                            });
+                        }
                     }
                 }
-                if (LINUX && --state.nextGameRunningCheck <= 0) {
+                if (LINUX && !isHubMode() && --state.nextGameRunningCheck <= 0) {
+                    // [hub] Skipped on the Hub: there is no local game, and
+                    // vrInit() would push a shared feed every single second.
                     state.nextGameRunningCheck = 1;
-                    await runUpdateIsGameRunningFlow(
-                        await AppApi.IsGameRunning(),
-                        await AppApi.IsSteamVRRunning()
-                    );
+                    const isGameRunning = await AppApi.IsGameRunning();
+                    const isSteamVRRunning = await AppApi.IsSteamVRRunning();
+                    await runUpdateIsGameRunningFlow(isGameRunning, isSteamVRRunning);
+                    if (isMirrorMode()) {
+                        uplinkGameState({ isGameRunning, isSteamVRRunning });
+                    }
                     vrStore.vrInit(); // TODO: make this event based
                 }
                 if (--state.nextDatabaseOptimize <= 0) {
