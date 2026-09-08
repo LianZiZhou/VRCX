@@ -3,6 +3,11 @@ import InteropApi from '../ipc-electron/interopApi.js';
 import configRepository from '../services/config.js';
 import vrcxJsonStorage from '../services/jsonStorage.js';
 
+// [hub] Optionally rebinds SQLite and WebApi to a remote Hub. See
+// src/hub/client/mirrorMode.js.
+import { EXPECTED_DATABASE_VERSION } from '../hub/shared/schema.js';
+import { initMirrorMode } from '../hub/client/mirrorMode.js';
+
 export async function initInteropApi(isVrOverlay = false) {
     if (isVrOverlay) {
         if (WINDOWS) {
@@ -34,8 +39,21 @@ export async function initInteropApi(isVrOverlay = false) {
             window.AppApiVrElectron = InteropApi.AppApiVrElectron;
         }
 
-        await configRepository.init();
         new vrcxJsonStorage(VRCXStorage);
+
+        // [hub] Must happen before configRepository.init(): the `configs` table
+        // is read through SQLite, so rebinding afterwards would leave this
+        // client's settings on its own local database rather than the Hub's.
+        // Returns null and changes nothing if there is no Hub configured or
+        // reachable, in which case VRCX runs exactly as it does today.
+        await initMirrorMode({
+            storage: VRCXStorage,
+            localWebApi: WebApi,
+            clientDatabaseVersion: EXPECTED_DATABASE_VERSION,
+            clientName: WINDOWS ? 'vrcx-windows' : 'vrcx-linux'
+        });
+
+        await configRepository.init();
 
         AppApi.SetUserAgent();
     }
