@@ -94,8 +94,18 @@ One machine cross-builds all six platforms, so `package-hub.js` verifies what
 it cannot run: the right native SQLite for the RID, the generated interop shim,
 the other five platforms' native hosts pruned, the bundled Node's ELF/Mach-O/PE
 header matching the target architecture, and -- by reading the finished zip
-back -- `start-hub.sh` keeping its executable bit. CI does the same through
-`.github/workflows/hub-release.yml`.
+back -- `start-hub.sh` keeping its executable bit.
+
+To build them in CI instead, push a tag:
+
+```bash
+git tag hub-v2026.07.18 && git push origin hub-v2026.07.18
+```
+
+`.github/workflows/hub-release.yml` picks that up and uploads the archives as
+run artifacts. It also declares `workflow_dispatch`, but GitHub only offers
+that button for workflows that exist on the repository's default branch, so
+while this lives only on `hub` the tag is the way in.
 
 ### Prerequisites (running from a checkout)
 
