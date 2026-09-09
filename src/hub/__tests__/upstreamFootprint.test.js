@@ -32,6 +32,9 @@ const ALLOWANCE = {
     'vitest.config.js': 6,
     'src/plugins/interopApi.js': 30,
     'src/services/database/index.js': 15,
+    // Three lines: a failed request's Error was JSON.stringified into "{}",
+    // which is what every network failure on a headless box would report.
+    'src/services/request.js': 8,
     'src/services/websocket.js': 25,
     'src/stores/updateLoop.js': 60,
     'src/stores/vrcx.js': 40
