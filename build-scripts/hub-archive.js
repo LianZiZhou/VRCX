@@ -113,7 +113,7 @@ function zipDirectory(dir, outFile, modeFor) {
         const payload = store ? data : deflated;
         const method = store ? 0 : 8;
         const crc = crc32(data);
-        const name = Buffer.from(rel.split(sep).join('/'), 'utf8');
+        const nameBytes = Buffer.from(rel.split(sep).join('/'), 'utf8');
 
         const local = Buffer.alloc(30);
         local.writeUInt32LE(SIG_LOCAL, 0);
@@ -125,8 +125,8 @@ function zipDirectory(dir, outFile, modeFor) {
         local.writeUInt32LE(crc, 14);
         local.writeUInt32LE(payload.length, 18);
         local.writeUInt32LE(data.length, 22);
-        local.writeUInt16LE(name.length, 26);
-        parts.push(local, name, payload);
+        local.writeUInt16LE(nameBytes.length, 26);
+        parts.push(local, nameBytes, payload);
 
         const entry = Buffer.alloc(46);
         entry.writeUInt32LE(SIG_CENTRAL, 0);
@@ -139,14 +139,14 @@ function zipDirectory(dir, outFile, modeFor) {
         entry.writeUInt32LE(crc, 16);
         entry.writeUInt32LE(payload.length, 20);
         entry.writeUInt32LE(data.length, 24);
-        entry.writeUInt16LE(name.length, 28);
+        entry.writeUInt16LE(nameBytes.length, 28);
         // The high half of the external attributes is the Unix mode. This is
         // the whole reason this writer exists.
         entry.writeUInt32LE(((modeFor(rel) & 0xffff) >>> 0) * 0x10000, 38);
         entry.writeUInt32LE(offset, 42);
-        central.push(entry, name);
+        central.push(entry, nameBytes);
 
-        offset += local.length + name.length + payload.length;
+        offset += local.length + nameBytes.length + payload.length;
     }
 
     const centralBuf = Buffer.concat(central);
@@ -198,13 +198,13 @@ function unzip(archive, destDir, rename = (p) => p) {
         const extraLen = buf.readUInt16LE(pos + 30);
         const commentLen = buf.readUInt16LE(pos + 32);
         const localOffset = buf.readUInt32LE(pos + 42);
-        const name = buf.toString('utf8', pos + 46, pos + 46 + nameLen);
+        const entryName = buf.toString('utf8', pos + 46, pos + 46 + nameLen);
         pos += 46 + nameLen + extraLen + commentLen;
 
-        if (name.endsWith('/')) {
+        if (entryName.endsWith('/')) {
             continue;
         }
-        const target = rename(name);
+        const target = rename(entryName);
         if (target === null) {
             continue;
         }
@@ -221,6 +221,24 @@ function unzip(archive, destDir, rename = (p) => p) {
         mkdirSync(dirname(outPath), { recursive: true });
         writeFileSync(outPath, data);
     }
+}
+
+/**
+ * Read one NUL-padded field out of a tar header.
+ *
+ * Written against the buffer rather than a decoded string so the source needs
+ * no NUL literal of its own: a real one in here makes git classify the file as
+ * binary, which silently turns off end-of-line normalisation.
+ *
+ * @param {Buffer} buf
+ * @param {number} start
+ * @param {number} end
+ * @returns {string}
+ */
+function tarField(buf, start, end) {
+    const slice = buf.subarray(start, end);
+    const terminator = slice.indexOf(0);
+    return slice.toString('utf8', 0, terminator === -1 ? slice.length : terminator);
 }
 
 /**
@@ -248,34 +266,37 @@ function untargz(archive, destDir, rename = (p) => p) {
             break;
         }
 
-        const rawName = header.toString('utf8', 0, 100).replace(/\0.*$/, '');
-        const prefix = header.toString('utf8', 345, 500).replace(/\0.*$/, '');
-        const sizeField = header.toString('utf8', 124, 136).replace(/\0.*$/, '').trim();
+        const rawName = tarField(header, 0, 100);
+        const prefix = tarField(header, 345, 500);
+        const sizeField = tarField(header, 124, 136).trim();
         const size = parseInt(sizeField, 8) || 0;
-        const mode = parseInt(header.toString('utf8', 100, 108).replace(/\0.*$/, '').trim(), 8) || 0o644;
-        const type = String.fromCharCode(header[156]);
+        const mode = parseInt(tarField(header, 100, 108).trim(), 8) || 0o644;
+        // 0x30 is '0', a regular file; a zero byte means the same in older
+        // archives. Compared numerically so the check reads off the byte.
+        const typeByte = header[156];
+        const type = String.fromCharCode(typeByte);
         const blocks = Math.ceil(size / 512);
         const body = tar.subarray(pos + 512, pos + 512 + size);
         pos += 512 + blocks * 512;
 
         if (type === 'L') {
             // GNU long name: the next header's name comes from this body.
-            longName = body.toString('utf8').replace(/\0.*$/, '');
+            longName = tarField(body, 0, body.length);
             continue;
         }
 
-        const name = longName ?? (prefix ? `${prefix}/${rawName}` : rawName);
+        const entryName = longName ?? (prefix ? `${prefix}/${rawName}` : rawName);
         longName = null;
 
-        if (type === '5' || name.endsWith('/')) {
+        if (type === '5' || entryName.endsWith('/')) {
             continue;
         }
-        if (type !== '0' && type !== '\0') {
+        if (typeByte !== 0x30 && typeByte !== 0) {
             // Symlinks (2), hard links (1), and anything exotic.
             continue;
         }
 
-        const target = rename(name);
+        const target = rename(entryName);
         if (target === null) {
             continue;
         }
