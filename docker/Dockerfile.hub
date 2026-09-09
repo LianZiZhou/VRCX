@@ -4,10 +4,15 @@
 # the repository root:
 #
 #   docker build -f docker/Dockerfile.hub -t vrcx-hub .
-#   docker run -d --name vrcx-hub \
+#   docker run -d --name vrcx-hub --restart unless-stopped \
 #     -p 9001:9001 -p 9002:9002 \
 #     -v vrcx-hub-data:/data \
 #     vrcx-hub
+#
+# `--restart` matters: after the migration tool uploads a database the Hub
+# exits with code 75 to be started again, and applies the import on the way
+# back up. Without a restart policy the container just stops, and the import
+# waits for the next `docker start`.
 #
 # The token is generated on first run into /data/hub-token. Read it with:
 #   docker exec vrcx-hub cat /data/hub-token
