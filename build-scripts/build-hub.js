@@ -6,10 +6,11 @@
  *
  *   node ./build-scripts/build-hub.js [--arch=arm64]
  *
- * The result is `build/hub/`, containing one bundled entry point plus a
- * manifest of the handful of dependencies that cannot be bundled: the .NET
- * interop addon (native), `ws` (native/optional requires) and happy-dom
- * (resolves its internals dynamically).
+ * The result is `build/hub/`, containing two bundled entry points -- `main.js`,
+ * the Hub, and `migrate.js`, the migration and backup tool -- plus a manifest
+ * of the handful of dependencies that cannot be bundled: the .NET interop
+ * addon (native), `ws` (native/optional requires) and happy-dom (resolves its
+ * internals dynamically).
  *
  * The .NET assemblies themselves are built separately, by
  * `dotnet publish Dotnet/VRCX-Electron-arm64.csproj`, and are expected at
@@ -17,7 +18,7 @@
  */
 
 const { execFileSync } = require('node:child_process');
-const { readFileSync, writeFileSync } = require('node:fs');
+const { existsSync, readFileSync, writeFileSync } = require('node:fs');
 const { join, resolve } = require('node:path');
 
 const rootDir = resolve(__dirname, '..');
@@ -75,7 +76,7 @@ function build() {
                 // The bundle is ESM. Without this Node reparses it and warns.
                 type: 'module',
                 main: 'main.js',
-                scripts: { start: 'node main.js' },
+                scripts: { start: 'node main.js', migrate: 'node migrate.js' },
                 dependencies,
                 engines: { node: rootManifest.engines?.node ?? '>=24' }
             },
@@ -84,6 +85,12 @@ function build() {
         )}\n`,
         'utf8'
     );
+
+    for (const entry of ['main.js', 'migrate.js']) {
+        if (!existsSync(join(outDir, entry))) {
+            throw new Error(`The bundle did not produce ${entry}`);
+        }
+    }
 
     console.log(`\nHub built to ${outDir}`);
     console.log('Deploy with:');

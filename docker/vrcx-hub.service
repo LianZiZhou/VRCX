@@ -24,7 +24,9 @@ Environment=DOTNET_ROOT=/usr/share/dotnet
 Environment=VRCX_HUB_DATA=/var/lib/vrcx-hub
 ExecStart=/usr/bin/node /opt/vrcx-hub/main.js --host=0.0.0.0
 
-# The Hub is meant to keep collecting; restart it whatever happens.
+# The Hub is meant to keep collecting; restart it whatever happens. This also
+# covers exit code 75, which is the Hub asking to be restarted so a database
+# uploaded by the migration tool can be applied on the way back up.
 Restart=always
 RestartSec=10
 

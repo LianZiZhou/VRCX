@@ -364,6 +364,38 @@ export function createHubConnection(options) {
         },
 
         /**
+         * Issue a maintenance operation (see `AdminOp` in `shared/protocol.js`).
+         *
+         * Same correlation as `call`, with a caller-chosen timeout: taking a
+         * snapshot of a large database on a Raspberry Pi can legitimately take
+         * longer than an interop call ever should.
+         *
+         * @param {string} op
+         * @param {any} [payload]
+         * @param {{ timeoutMs?: number }} [options]
+         * @returns {Promise<any>}
+         */
+        admin(op, payload = {}, options = {}) {
+            if (state !== ConnectionState.READY || !socket) {
+                return Promise.reject(new Error('Hub connection is not ready'));
+            }
+            const timeoutMs = options.timeoutMs ?? CALL_TIMEOUT_MS;
+            const id = ++seq;
+            return new Promise((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    pending.delete(id);
+                    reject(new Error(`Hub admin call timed out: ${op}`));
+                }, timeoutMs);
+                pending.set(id, { resolve, reject, timer });
+                sendSealed({ i: id, t: FrameType.ADMIN, p: { op, payload } }).catch((err) => {
+                    pending.delete(id);
+                    clearTimeout(timer);
+                    reject(err);
+                });
+            });
+        },
+
+        /**
          * Push locally-sourced data (gamelog lines, Photon events, game state)
          * to the Hub. Fire and forget: the Hub persists it and echoes it back
          * as a broadcast event.

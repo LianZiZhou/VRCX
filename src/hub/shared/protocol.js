@@ -34,6 +34,8 @@ export const FrameType = {
     EVENT: 'event',
     /** client -> hub: locally-sourced data (gamelog lines, photon, game state) */
     UPLINK: 'uplink',
+    /** client -> hub: a maintenance operation (see `AdminOp`); answered with result/error */
+    ADMIN: 'admin',
     PING: 'ping',
     PONG: 'pong'
 };
@@ -52,6 +54,36 @@ export const EventType = {
     /** connection count, pipeline health, uptime */
     HUB_STATE: 'hub-state'
 };
+
+/**
+ * Operations carried by the `admin` frame: moving a whole database in or out
+ * of the Hub. They need no privilege beyond the shared token -- a client that
+ * holds it already has unrestricted SQL through `call` -- but they are kept off
+ * the interop path because they touch files, not rows, and because the Hub has
+ * to restart to apply an import.
+ *
+ * The import is chunked so a multi-gigabyte database neither has to fit in one
+ * frame nor be held in memory on a Raspberry Pi. Chunks are acknowledged one at
+ * a time, which is all the flow control a LAN needs.
+ */
+export const AdminOp = {
+    /** what the Hub is running, where its data lives, and any staged import */
+    INFO: 'hub.info',
+    /** announce an upload: size, digest, and the sender's manifest */
+    IMPORT_BEGIN: 'import.begin',
+    /** one base64 chunk at the offset the Hub last acknowledged */
+    IMPORT_CHUNK: 'import.chunk',
+    /** verify the upload, stage it, and (if a supervisor is present) restart */
+    IMPORT_COMMIT: 'import.commit',
+    IMPORT_ABORT: 'import.abort',
+    /** take a consistent copy of the Hub's database and offer it for download */
+    SNAPSHOT_BEGIN: 'snapshot.begin',
+    SNAPSHOT_READ: 'snapshot.read',
+    SNAPSHOT_END: 'snapshot.end'
+};
+
+/** Bytes per `import.chunk` / `snapshot.read`. Base64 grows this by a third. */
+export const ADMIN_CHUNK_BYTES = 4 * 1024 * 1024;
 
 export const RejectReason = {
     BAD_TOKEN: 'bad-token',

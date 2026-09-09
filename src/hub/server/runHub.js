@@ -7,12 +7,16 @@
  */
 
 import { createHubServer } from './wsServer.js';
+import { createAdminHandler } from './adminHandler.js';
 import { createInteropHandler } from './interopHandler.js';
 import { createNativeBridge, shutdownNativeBridge } from './nativeBridge.js';
 import { createStatusServer } from './statusServer.js';
 import { EventType } from '../shared/protocol.js';
 import { HubMode, setHubMode } from '../shared/mode.js';
-import { HUB_USAGE, loadHubConfig } from './config.js';
+import { HUB_USAGE, loadHubConfig, RESTART_EXIT_CODE } from './config.js';
+import { applyPendingImport } from './pendingImport.js';
+import { EXPECTED_DATABASE_VERSION } from '../shared/schema.js';
+import { resolveDatabasePath } from '../migrate/dataDir.js';
 import { installNativeStubs } from '../bootstrap/nativeStubs.js';
 import { setPipelineObserver } from '../shared/pipelineRelay.js';
 import { startHubCore, startHubRuntime } from '../bootstrap/core.js';
@@ -48,7 +52,8 @@ function bindNatives(natives) {
 
 /**
  * @param {{ argv?: string[], rootDir?: string, startRuntime?: boolean,
- *           installSignalHandlers?: boolean }} [options]
+ *           installSignalHandlers?: boolean,
+ *           onRestartRequest?: ((reason: string) => void) | null }} [options]
  * @returns {Promise<object>} a handle with `stop()`
  */
 export async function runHub(options = {}) {
@@ -58,7 +63,11 @@ export async function runHub(options = {}) {
         // Tests embed the Hub and drive it directly, so they opt out of signing
         // in and of taking over the process signals.
         startRuntime = true,
-        installSignalHandlers = true
+        installSignalHandlers = true,
+        // What a restart request does. The default exits with RESTART_EXIT_CODE
+        // for the supervisor to act on; an embedded Hub gets a no-op instead of
+        // having its test runner killed.
+        onRestartRequest = installSignalHandlers ? null : () => {}
     } = options;
 
     if (argv.includes('--help') || argv.includes('-h')) {
@@ -80,6 +89,15 @@ export async function runHub(options = {}) {
     log(`Starting ${HUB_VERSION}`);
     log(`Node ${process.versions.node} on ${process.platform}-${process.arch}`);
     log(`Data directory: ${config.configDir}`);
+
+    // --- staged import ----------------------------------------------------
+    // Before the .NET side opens the database: an upload from the migration
+    // tool waiting in import-pending/ is moved into place here, and the
+    // previous file into backups/. See server/pendingImport.js.
+    const databasePath = resolveDatabasePath(config.configDir);
+    if (!config.dryRun) {
+        await applyPendingImport({ configDir: config.configDir, databasePath, log });
+    }
 
     // --- native layer -----------------------------------------------------
     let natives = null;
@@ -112,6 +130,40 @@ export async function runHub(options = {}) {
         ttlMs: 0
     });
 
+    /**
+     * Ask the supervisor for a fresh process. `stop` is defined further down;
+     * by the time anything can call this it exists.
+     *
+     * @param {string} reason
+     */
+    function requestRestart(reason) {
+        log(`Restarting: ${reason}`);
+        stop()
+            .catch((err) => log('Shutdown before restart failed', err))
+            .then(() => {
+                if (onRestartRequest) {
+                    onRestartRequest(reason);
+                } else {
+                    process.exit(RESTART_EXIT_CODE);
+                }
+            });
+    }
+
+    const handleAdmin = createAdminHandler({
+        configDir: config.configDir,
+        databasePath,
+        hubVersion: HUB_VERSION,
+        expectedSchemaVersion: EXPECTED_DATABASE_VERSION,
+        getStatus: () => ({
+            loggedIn: Boolean(stores.user.currentUser?.id),
+            userId: stores.user.currentUser?.id ?? null,
+            displayName: stores.user.currentUser?.displayName ?? null,
+            clientCount: server.clientCount
+        }),
+        requestRestart,
+        log
+    });
+
     const server = createHubServer({
         port: config.port,
         host: config.host,
@@ -126,12 +178,15 @@ export async function runHub(options = {}) {
             : handleCall,
         describe: () => ({
             hub: HUB_VERSION,
+            // Advertises the `admin` frame; the migration tool checks for it.
+            admin: true,
             databaseVersion: stores.vrcx.state.databaseVersion ?? 0,
             loggedIn: Boolean(stores.user.currentUser?.id),
             userId: stores.user.currentUser?.id ?? null,
             displayName: stores.user.currentUser?.displayName ?? null
         }),
-        onUplink: (kind, data) => handleUplink(kind, data)
+        onUplink: (kind, data) => handleUplink(kind, data),
+        onAdmin: handleAdmin
     });
 
     /**
@@ -284,5 +339,5 @@ export async function runHub(options = {}) {
         });
     }
 
-    return { stop, server, status, stores, config };
+    return { stop, server, status, stores, config, requestRestart };
 }
