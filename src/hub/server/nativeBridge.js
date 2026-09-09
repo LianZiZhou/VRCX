@@ -67,9 +67,11 @@ function configureDotnetRuntime(rootDir) {
 function assemblyCandidates(rootDir) {
     const dirs = ['dotnet', 'build/Electron'];
     const names =
-        // The arm64 csproj emits a differently named shim. Prefer it there,
-        // but still fall back: an arm64 box can run a build made from the
-        // plain csproj, which is what the release zips ship.
+        // The arm64 csproj emits a differently named shim, and on arm64 it is
+        // the only one that works: the plain csproj's System.Data.SQLite has
+        // no arm64 native library (package-hub.js explains). The fallback is
+        // kept for a checkout that built the plain project by hand, where the
+        // error message from SQLite is at least immediate and clear.
         process.arch === 'arm64' ? ['VRCX-Electron-arm64.cjs', 'VRCX-Electron.cjs'] : ['VRCX-Electron.cjs'];
 
     return dirs.flatMap((dir) => names.map((name) => join(rootDir, dir, name)));
