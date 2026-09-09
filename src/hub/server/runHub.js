@@ -142,7 +142,7 @@ export async function runHub(options = {}) {
         });
         // The one place the .NET side's HTTP failure reason can still be read
         // before upstream code reduces it to `{}`.
-        logWebApiFailures(natives.WebApi, { log });
+        natives.WebApi = logWebApiFailures(natives.WebApi, { log });
         bindNatives(natives);
         const where = natives.runtime.bundled ? 'bundled' : 'system';
         log(`.NET bridge ready (SQLite, WebApi, VRCXStorage) on ${natives.runtime.description} [${where}]`);
