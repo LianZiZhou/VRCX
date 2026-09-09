@@ -7,35 +7,34 @@
  */
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
+import { defaultDataDir, TOKEN_FILE } from '../migrate/dataDir.js';
+
 const DEFAULT_PORT = 9001;
 const DEFAULT_STATUS_PORT = 9002;
-const TOKEN_FILE = 'hub-token';
 
 /**
- * Where VRCX keeps its data on Linux, matching what `Program.SetProgramDirectories`
- * does on the .NET side so the Hub and any local VRCX agree on the path.
+ * The exit code with which the Hub asks to be started again.
  *
+ * A staged database import is applied at boot, before the .NET side opens the
+ * file, so applying one means a full restart. The launchers in the release
+ * zips loop on this code, systemd's `Restart=always` covers it, and a Docker
+ * `--restart` policy does too. Run by hand, the Hub simply exits and the import
+ * waits for the next start. 75 is `EX_TEMPFAIL` in sysexits.h -- "try again",
+ * which is exactly the request.
+ */
+export const RESTART_EXIT_CODE = 75;
+
+/**
  * @returns {string}
  */
 function defaultConfigDir() {
     if (process.env.VRCX_HUB_DATA) {
         return resolve(process.env.VRCX_HUB_DATA);
     }
-    const xdg = process.env.XDG_CONFIG_HOME;
-    if (xdg) {
-        return join(xdg, 'VRCX');
-    }
-    if (process.platform === 'darwin') {
-        return join(homedir(), 'Library', 'Application Support', 'VRCX');
-    }
-    if (process.platform === 'win32') {
-        return join(process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'), 'VRCX');
-    }
-    return join(homedir(), '.config', 'VRCX');
+    return defaultDataDir();
 }
 
 /**
