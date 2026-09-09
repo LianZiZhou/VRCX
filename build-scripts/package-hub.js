@@ -62,13 +62,43 @@ const NODE_DIST = 'https://nodejs.org/dist';
  * macOS (`osx` vs `darwin`), which is the only reason this table exists.
  */
 const PLATFORMS = {
-    'linux-x64': { nodeName: 'linux-x64', nodeExt: 'tar.gz', dotnetExt: 'tar.gz', windows: false },
-    'linux-arm64': { nodeName: 'linux-arm64', nodeExt: 'tar.gz', dotnetExt: 'tar.gz', windows: false },
-    'win-x64': { nodeName: 'win-x64', nodeExt: 'zip', dotnetExt: 'zip', windows: true },
-    'win-arm64': { nodeName: 'win-arm64', nodeExt: 'zip', dotnetExt: 'zip', windows: true },
-    'osx-x64': { nodeName: 'darwin-x64', nodeExt: 'tar.gz', dotnetExt: 'tar.gz', windows: false },
-    'osx-arm64': { nodeName: 'darwin-arm64', nodeExt: 'tar.gz', dotnetExt: 'tar.gz', windows: false }
+    'linux-x64': { nodeName: 'linux-x64', nodeExt: 'tar.gz', dotnetExt: 'tar.gz', windows: false, arm64: false },
+    'linux-arm64': { nodeName: 'linux-arm64', nodeExt: 'tar.gz', dotnetExt: 'tar.gz', windows: false, arm64: true },
+    'win-x64': { nodeName: 'win-x64', nodeExt: 'zip', dotnetExt: 'zip', windows: true, arm64: false },
+    'win-arm64': { nodeName: 'win-arm64', nodeExt: 'zip', dotnetExt: 'zip', windows: true, arm64: true },
+    'osx-x64': { nodeName: 'darwin-x64', nodeExt: 'tar.gz', dotnetExt: 'tar.gz', windows: false, arm64: false },
+    'osx-arm64': { nodeName: 'darwin-arm64', nodeExt: 'tar.gz', dotnetExt: 'tar.gz', windows: false, arm64: true }
 };
+
+/**
+ * Upstream keeps two Electron csproj files that differ in one thing that
+ * matters here: the SQLite binding. `VRCX-Electron.csproj` pins
+ * System.Data.SQLite 1.0.119, whose native `SQLite.Interop.dll` exists only
+ * for x64 (and win-x86). `VRCX-Electron-arm64.csproj` uses 2.0.3, which binds
+ * to SourceGear's `e_sqlite3` and so runs on arm64. Publishing the x64 project
+ * for an arm64 RID builds without complaint and then fails on the Pi with
+ * "Unable to load shared library 'SQLite.Interop.dll'" -- which is how this
+ * table came to exist.
+ *
+ * The generated node-api-dotnet shim is named after the project, which is why
+ * `server/nativeBridge.js` looks for `VRCX-Electron-arm64.cjs` first on arm64.
+ *
+ * @param {string} platform
+ * @returns {{ csproj: string, assembly: string, sqlite: string }}
+ */
+function dotnetProjectFor(platform) {
+    const { arm64, windows } = PLATFORMS[platform];
+    if (arm64) {
+        const sqlite = windows
+            ? 'e_sqlite3.dll'
+            : platform.startsWith('osx')
+              ? 'libe_sqlite3.dylib'
+              : 'libe_sqlite3.so';
+        return { csproj: 'VRCX-Electron-arm64.csproj', assembly: 'VRCX-Electron-arm64', sqlite };
+    }
+    // 1.0.119 names its native library the same on every OS.
+    return { csproj: 'VRCX-Electron.csproj', assembly: 'VRCX-Electron', sqlite: 'SQLite.Interop.dll' };
+}
 
 const VARIANTS = ['full', 'slim'];
 
@@ -277,7 +307,7 @@ function publishDotnet(platform, destDir) {
         'dotnet',
         [
             'publish',
-            join(rootDir, 'Dotnet', 'VRCX-Electron.csproj'),
+            join(rootDir, 'Dotnet', dotnetProjectFor(platform).csproj),
             '-r',
             platform,
             // `--self-contained false` is parsed as a flag plus a stray project
@@ -296,8 +326,9 @@ function publishDotnet(platform, destDir) {
         { cwd: rootDir, stdio: ['ignore', 'ignore', 'inherit'] }
     );
 
-    if (!existsSync(join(destDir, 'VRCX-Electron.cjs'))) {
-        throw new Error(`${platform}: publish produced no VRCX-Electron.cjs`);
+    const shim = `${dotnetProjectFor(platform).assembly}.cjs`;
+    if (!existsSync(join(destDir, shim))) {
+        throw new Error(`${platform}: publish produced no ${shim}`);
     }
 }
 
@@ -745,12 +776,12 @@ function buildTool(options) {
  * answered by reading the file header rather than by running it.
  */
 const EXPECTED = {
-    'linux-x64': { sqlite: 'libe_sqlite3.so', hostfxr: 'libhostfxr.so', format: 'elf', machine: 0x3e },
-    'linux-arm64': { sqlite: 'libe_sqlite3.so', hostfxr: 'libhostfxr.so', format: 'elf', machine: 0xb7 },
-    'win-x64': { sqlite: 'e_sqlite3.dll', hostfxr: 'hostfxr.dll', format: 'pe', machine: 0x8664 },
-    'win-arm64': { sqlite: 'e_sqlite3.dll', hostfxr: 'hostfxr.dll', format: 'pe', machine: 0xaa64 },
-    'osx-x64': { sqlite: 'libe_sqlite3.dylib', hostfxr: 'libhostfxr.dylib', format: 'macho', machine: 0x01000007 },
-    'osx-arm64': { sqlite: 'libe_sqlite3.dylib', hostfxr: 'libhostfxr.dylib', format: 'macho', machine: 0x0100000c }
+    'linux-x64': { hostfxr: 'libhostfxr.so', format: 'elf', machine: 0x3e },
+    'linux-arm64': { hostfxr: 'libhostfxr.so', format: 'elf', machine: 0xb7 },
+    'win-x64': { hostfxr: 'hostfxr.dll', format: 'pe', machine: 0x8664 },
+    'win-arm64': { hostfxr: 'hostfxr.dll', format: 'pe', machine: 0xaa64 },
+    'osx-x64': { hostfxr: 'libhostfxr.dylib', format: 'macho', machine: 0x01000007 },
+    'osx-arm64': { hostfxr: 'libhostfxr.dylib', format: 'macho', machine: 0x0100000c }
 };
 
 /**
@@ -799,14 +830,15 @@ function verifyStage(stage, platform, variant, dotnetVersion) {
     const info = PLATFORMS[platform];
     const expected = EXPECTED[platform];
 
+    const project = dotnetProjectFor(platform);
     const required = [
         'main.js',
         'migrate.js',
         'package.json',
         'README.txt',
-        join('dotnet', 'VRCX-Electron.cjs'),
-        join('dotnet', 'VRCX-Electron.dll'),
-        join('dotnet', expected.sqlite),
+        join('dotnet', `${project.assembly}.cjs`),
+        join('dotnet', `${project.assembly}.dll`),
+        join('dotnet', project.sqlite),
         join('dotnet-runtime', 'host', 'fxr', dotnetVersion, expected.hostfxr),
         join('node_modules', 'node-api-dotnet', platform, 'Microsoft.JavaScript.NodeApi.node'),
         info.windows ? 'start-hub.cmd' : 'start-hub.sh',
@@ -824,6 +856,19 @@ function verifyStage(stage, platform, variant, dotnetVersion) {
         if (other !== platform && existsSync(join(stage, 'node_modules', 'node-api-dotnet', other))) {
             throw new Error(`${platform}/${variant}: ${other} native host was not pruned`);
         }
+    }
+
+    // The SQLite native is the one file whose absence or wrong architecture
+    // only shows up on the target machine, at the first database open. Check
+    // its header the same way the Node binary's is checked. (On Linux and
+    // macOS 1.0.119's library is an ELF/Mach-O file that happens to be named
+    // .dll, and the header check does not care about the name.)
+    const sqliteMachine = machineOf(join(stage, 'dotnet', project.sqlite), expected.format);
+    if (sqliteMachine !== expected.machine) {
+        throw new Error(
+            `${platform}/${variant}: ${project.sqlite} is machine 0x${sqliteMachine.toString(16)}, ` +
+                `expected 0x${expected.machine.toString(16)}`
+        );
     }
 
     if (variant === 'full') {
