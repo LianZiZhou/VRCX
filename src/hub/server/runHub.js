@@ -78,6 +78,7 @@ export async function runHub(options = {}) {
     };
 
     log(`Starting ${HUB_VERSION}`);
+    log(`Node ${process.versions.node} on ${process.platform}-${process.arch}`);
     log(`Data directory: ${config.configDir}`);
 
     // --- native layer -----------------------------------------------------
@@ -97,7 +98,8 @@ export async function runHub(options = {}) {
             version: HUB_VERSION
         });
         bindNatives(natives);
-        log('.NET bridge ready (SQLite, WebApi, VRCXStorage)');
+        const where = natives.runtime.bundled ? 'bundled' : 'system';
+        log(`.NET bridge ready (SQLite, WebApi, VRCXStorage) on ${natives.runtime.description} [${where}]`);
     }
 
     // --- data core --------------------------------------------------------
