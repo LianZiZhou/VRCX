@@ -42,27 +42,50 @@ const require = createRequire(import.meta.url);
  * Point the .NET host at a bundled runtime when one is shipped alongside.
  *
  * @param {string} rootDir
+ * @returns {boolean} whether a bundled runtime was found and selected
  */
 function configureDotnetRuntime(rootDir) {
     const bundled = join(rootDir, 'dotnet-runtime');
-    if (existsSync(bundled)) {
-        process.env.DOTNET_ROOT = bundled;
-        process.env.PATH = `${bundled}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}`;
+    if (!existsSync(bundled)) {
+        return false;
     }
+    process.env.DOTNET_ROOT = bundled;
+    process.env.PATH = `${bundled}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}`;
+    return true;
 }
 
 /**
- * @param {string} rootDir - directory holding `build/Electron/*.cjs`
+ * Where the generated node-api-dotnet shim may live, in order of preference.
+ *
+ * `dotnet/` is the layout inside a release zip; `build/Electron/` is where a
+ * `dotnet build` in a checkout puts it. Both are searched so the same bundle
+ * runs from a release and from the repo without being told which it is.
+ *
+ * @param {string} rootDir
+ * @returns {string[]}
+ */
+function assemblyCandidates(rootDir) {
+    const dirs = ['dotnet', 'build/Electron'];
+    const names =
+        // The arm64 csproj emits a differently named shim. Prefer it there,
+        // but still fall back: an arm64 box can run a build made from the
+        // plain csproj, which is what the release zips ship.
+        process.arch === 'arm64' ? ['VRCX-Electron-arm64.cjs', 'VRCX-Electron.cjs'] : ['VRCX-Electron.cjs'];
+
+    return dirs.flatMap((dir) => names.map((name) => join(rootDir, dir, name)));
+}
+
+/**
+ * @param {string} rootDir - directory holding `dotnet/` or `build/Electron/`
  * @returns {string} the assembly shim that was loaded
  */
 function loadAssembly(rootDir) {
-    const arm64 = join(rootDir, 'build/Electron/VRCX-Electron-arm64.cjs');
-    const x64 = join(rootDir, 'build/Electron/VRCX-Electron.cjs');
-    const path = process.arch === 'arm64' && existsSync(arm64) ? arm64 : x64;
-    if (!existsSync(path)) {
+    const candidates = assemblyCandidates(rootDir);
+    const path = candidates.find((candidate) => existsSync(candidate));
+    if (!path) {
         throw new Error(
-            `VRCX .NET assembly not found at ${path}. Build it first ` +
-                `(dotnet build Dotnet/VRCX-Electron.csproj) or run the Hub with --dry-run.`
+            `VRCX .NET assembly not found. Looked in: ${candidates.join(', ')}. ` +
+                `Build it first (dotnet build Dotnet/VRCX-Electron.csproj) or run the Hub with --dry-run.`
         );
     }
     require(path);
@@ -75,6 +98,7 @@ function loadAssembly(rootDir) {
  * @property {object} WebApi
  * @property {object} VRCXStorage
  * @property {object} Program
+ * @property {{ description: string, bundled: boolean }} runtime
  */
 
 /**
@@ -86,11 +110,18 @@ function loadAssembly(rootDir) {
 export async function createNativeBridge(options) {
     const { rootDir, configDir, version } = options;
 
-    configureDotnetRuntime(rootDir);
+    const bundled = configureDotnetRuntime(rootDir);
     loadAssembly(rootDir);
 
     const dotnet = require('node-api-dotnet/net10.0');
     const VRCX = dotnet.VRCX;
+
+    // Worth logging: a release ships its own runtime, and "which .NET is this
+    // actually on" is the first question when a box also has one installed.
+    const runtime = {
+        description: String(dotnet.System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription),
+        bundled
+    };
 
     const Program = new VRCX.ProgramElectron();
     const VRCXStorage = new VRCX.VRCXStorage();
@@ -104,7 +135,7 @@ export async function createNativeBridge(options) {
     SQLite.Init();
     WebApi.Init();
 
-    return { SQLite, WebApi, VRCXStorage, Program };
+    return { SQLite, WebApi, VRCXStorage, Program, runtime };
 }
 
 /**

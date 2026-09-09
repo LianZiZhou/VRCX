@@ -1,0 +1,103 @@
+# [hub] Builds the release zips.
+#
+# Separate from hub.yml because this is expensive: twelve archives, and around
+# 1.5 GB of .NET runtimes and Node builds to fetch. hub.yml runs on every push
+# to the branch; this one is asked for.
+#
+# It uploads artifacts and stops there. Attaching them to a public release is
+# left as a deliberate manual step.
+name: Hub release zips
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Comma-separated: linux-x64, linux-arm64, win-x64, win-arm64, osx-x64, osx-arm64'
+        required: false
+        default: 'linux-x64,linux-arm64,win-x64,win-arm64,osx-x64,osx-arm64'
+      variants:
+        description: '"full" bundles Node, "slim" expects it on PATH'
+        required: false
+        default: 'full,slim'
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    # Twelve archives, each with its own dotnet publish.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: npm
+
+      # Every RID is cross-published from this one Linux runner: `dotnet
+      # publish -r osx-arm64` needs no macOS, it restores that RID's runtime
+      # assets and copies them next to the assemblies.
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      # The .NET runtimes and Node builds are immutable once published, so a
+      # hit here saves the whole download.
+      - name: Cache downloaded runtimes
+        uses: actions/cache@v4
+        with:
+          path: build/.cache
+          key: hub-release-runtimes-${{ hashFiles('.github/workflows/hub-release.yml') }}
+          restore-keys: hub-release-runtimes-
+
+      - run: npm ci
+
+      # Cheap, and a failure here is much easier to read than one surfacing
+      # halfway through packaging.
+      - run: npm run test:hub
+
+      - name: Package
+        run: >-
+          node ./build-scripts/package-hub.js
+          --platforms=${{ inputs.platforms }}
+          --variants=${{ inputs.variants }}
+
+      # package-hub.js already checks each staged tree (right assemblies, right
+      # native SQLite, and the bundled Node's ELF/Mach-O/PE header matching the
+      # target architecture) and re-reads each zip to confirm start-hub.sh kept
+      # its executable bit. This is the independent read-back.
+      - name: Inspect the finished archives
+        run: |
+          set -euo pipefail
+          cd build/dist
+          ls -la
+          for zip in *.zip; do
+            echo "--- $zip"
+            # Fails the job if the archive is not well-formed.
+            unzip -t "$zip" > /dev/null
+            case "$zip" in
+              *linux*|*osx*)
+                perms=$(unzip -Z "$zip" | grep '/start-hub\.sh$' | awk '{print $1}')
+                echo "    start-hub.sh $perms"
+                case "$perms" in
+                  -rwx*) ;;
+                  *) echo "::error::$zip: start-hub.sh is not executable"; exit 1 ;;
+                esac
+                ;;
+            esac
+          done
+          echo
+          cat SHA256SUMS.txt
+
+      - name: Upload archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: vrcx-hub-release
+          path: |
+            build/dist/*.zip
+            build/dist/SHA256SUMS.txt
+          retention-days: 14
+          compression-level: 0
