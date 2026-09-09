@@ -6,9 +6,22 @@
 #
 # It uploads artifacts and stops there. Attaching them to a public release is
 # left as a deliberate manual step.
+#
+# Two ways in. A tag is the one that works from this branch:
+#
+#     git tag hub-v2026.07.18 && git push origin hub-v2026.07.18
+#
+# A tag push runs the workflow as it exists at the tagged commit, so the file
+# only has to be on `hub`. The workflow_dispatch button, by contrast, is only
+# offered for workflows present on the repository's default branch -- which
+# here is `master`, where this file does not exist. It is kept for whenever
+# that stops being true.
 name: Hub release zips
 
 on:
+  push:
+    tags:
+      - 'hub-v*'
   workflow_dispatch:
     inputs:
       platforms:
@@ -59,11 +72,12 @@ jobs:
       # halfway through packaging.
       - run: npm run test:hub
 
+      # `inputs.*` is empty on a tag push, so each falls back to everything.
       - name: Package
         run: >-
           node ./build-scripts/package-hub.js
-          --platforms=${{ inputs.platforms }}
-          --variants=${{ inputs.variants }}
+          --platforms=${{ inputs.platforms || 'linux-x64,linux-arm64,win-x64,win-arm64,osx-x64,osx-arm64' }}
+          --variants=${{ inputs.variants || 'full,slim' }}
 
       # package-hub.js already checks each staged tree (right assemblies, right
       # native SQLite, and the bundled Node's ELF/Mach-O/PE header matching the
