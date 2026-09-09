@@ -183,6 +183,34 @@ jobs:
           name: vrcx-hub
           path: |
             build/hub/main.js
+            build/hub/migrate.js
             build/hub/package.json
             build/hub/assets/
           retention-days: 7
+
+      # The migration tool as its own download, needing only Node. Cheap
+      # enough to produce on every push: no .NET, no runtime downloads.
+      - name: Package the migration tool
+        run: node ./build-scripts/package-hub.js --skip-bundle --tool-only --tool=any
+
+      - name: Smoke-test the packaged tool
+        run: |
+          set -euo pipefail
+          work="$PWD/build/tool-ci"
+          rm -rf "$work" && mkdir -p "$work"
+          unzip -q build/dist/vrcx-hub-migrate-*-any.zip -d "$work"
+          dir=$(find "$work" -maxdepth 1 -mindepth 1 -type d)
+          "$dir/vrcx-hub-migrate.sh" help | head -n 3
+          # An empty data directory is reported, not crashed on.
+          if "$dir/vrcx-hub-migrate.sh" info --from="$work" 2> "$work/err.log"; then
+            echo "::error::info on an empty directory should fail"; exit 1
+          fi
+          grep -q "No VRCX.sqlite3" "$work/err.log"
+
+      - name: Upload the migration tool
+        uses: actions/upload-artifact@v4
+        with:
+          name: vrcx-hub-migrate
+          path: build/dist/vrcx-hub-migrate-*-any.zip
+          retention-days: 7
+          compression-level: 0
