@@ -82,21 +82,29 @@ jobs:
       # exists to catch -- so this must never widen to cover them.
       - name: Format (Hub-owned files only)
         run: |
-          paths="src/hub vitest.hub.config.js src/vite.hub.config.js             build-scripts/build-hub.js build-scripts/hub-merge-offline.js             build-scripts/hub-archive.js build-scripts/package-hub.js"
+          paths="src/hub vitest.hub.config.js src/vite.hub.config.js
+            build-scripts/build-hub.js build-scripts/hub-merge-offline.js
+            build-scripts/hub-archive.js build-scripts/package-hub.js"
 
           if ./node_modules/.bin/oxfmt --check -c .oxfmtrc.json $paths > fmt.log 2>&1; then
             cat fmt.log
             exit 0
           fi
-          cat fmt.log
 
-          # Job logs need admin rights to download, so put the actual diff into
-          # the run's annotations, which are readable without them.
-          ./node_modules/.bin/oxfmt -c .oxfmtrc.json $paths > /dev/null 2>&1 || true
-          git --no-pager diff --unified=1 > fmt.diff || true
-          head -n 60 fmt.diff | while IFS= read -r line; do
-            echo "::error::fmt: $line"
-          done
+          # A job log needs admin rights on the repository to download;
+          # annotations do not. So on failure the facts needed to diagnose this
+          # go out as annotations, kept to a handful of lines because GitHub
+          # only surfaces the first ten per step.
+          {
+            echo "cwd=$PWD config=$(ls -l .oxfmtrc.json 2>&1 | tail -c 60)"
+            echo "oxfmt=$(./node_modules/.bin/oxfmt --version 2>&1 | tr -d '
+')"
+            echo "--- oxfmt --check said:"
+            head -n 6 fmt.log
+          } > diag.txt
+          cat fmt.log
+          cat diag.txt
+          while IFS= read -r line; do echo "::error::$line"; done < diag.txt
           exit 1
 
   build:
