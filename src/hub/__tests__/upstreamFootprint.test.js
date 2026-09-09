@@ -25,6 +25,9 @@ const repoRoot = resolve(import.meta.dirname, '../../..');
  * may carry. Anything not listed here should be a new file under `src/hub/`.
  */
 const ALLOWANCE = {
+    // Four lines: `workflow_call` plus a comment, so the Hub's release
+    // pipeline can reuse the client build instead of duplicating it.
+    '.github/workflows/github_actions.yml': 6,
     'package.json': 12,
     'vitest.config.js': 6,
     'src/plugins/interopApi.js': 30,
