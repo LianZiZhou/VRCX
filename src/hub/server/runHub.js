@@ -11,6 +11,7 @@ import { createAdminHandler } from './adminHandler.js';
 import { createInteropHandler } from './interopHandler.js';
 import { createNativeBridge, shutdownNativeBridge } from './nativeBridge.js';
 import { createStatusServer } from './statusServer.js';
+import { logWebApiFailures } from './webApiLog.js';
 import { diagnoseVrchatReachability } from './networkCheck.js';
 import { EventType } from '../shared/protocol.js';
 import { HubMode, setHubMode } from '../shared/mode.js';
@@ -92,6 +93,29 @@ export async function runHub(options = {}) {
     log(`Data directory: ${config.configDir}`);
 
     // --- staged import ----------------------------------------------------
+    if (installSignalHandlers) {
+        // Node terminates the process on an unhandled rejection by default
+        // (v15+). The data core fires plenty of un-awaited API calls from
+        // background paths -- a pipeline event triggering a user lookup, say --
+        // so a transient VRChat error would otherwise take the Hub down. A
+        // 24/7 daemon should log it and keep collecting.
+        //
+        // Installed here, before the data core boots, and not at the end of
+        // start-up as it once was: the start-up sign-in itself forks its
+        // request promise (services/request.js merges concurrent GETs), and
+        // when that failed the second branch's rejection arrived before the
+        // handler existed and killed the process.
+        process.on('unhandledRejection', (reason) => {
+            log('Unhandled rejection (continuing)', reason);
+        });
+        // The desktop app runs in a browser, where a throw from a timer or an
+        // event callback is logged and life goes on. Give the same code the
+        // same treatment here.
+        process.on('uncaughtException', (err) => {
+            log('Uncaught exception (continuing)', err);
+        });
+    }
+
     // Before the .NET side opens the database: an upload from the migration
     // tool waiting in import-pending/ is moved into place here, and the
     // previous file into backups/. See server/pendingImport.js.
@@ -116,6 +140,9 @@ export async function runHub(options = {}) {
             configDir: config.configDir,
             version: HUB_VERSION
         });
+        // The one place the .NET side's HTTP failure reason can still be read
+        // before upstream code reduces it to `{}`.
+        logWebApiFailures(natives.WebApi, { log });
         bindNatives(natives);
         const where = natives.runtime.bundled ? 'bundled' : 'system';
         log(`.NET bridge ready (SQLite, WebApi, VRCXStorage) on ${natives.runtime.description} [${where}]`);
@@ -334,17 +361,6 @@ export async function runHub(options = {}) {
         if (!config.dryRun) {
             shutdownNativeBridge(natives);
         }
-    }
-
-    if (installSignalHandlers) {
-        // Node terminates the process on an unhandled rejection by default
-        // (v15+). The data core fires plenty of un-awaited API calls from
-        // background paths -- a pipeline event triggering a user lookup, say --
-        // so a transient VRChat error would otherwise take the Hub down. A
-        // 24/7 daemon should log it and keep collecting.
-        process.on('unhandledRejection', (reason) => {
-            log('Unhandled rejection (continuing)', reason);
-        });
     }
 
     for (const signal of installSignalHandlers ? ['SIGINT', 'SIGTERM'] : []) {
