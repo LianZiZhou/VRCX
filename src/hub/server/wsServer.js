@@ -43,6 +43,8 @@ const Phase = {
  * @property {{ key: string, cert: string }} [tls] - optional TLS on top of the AEAD
  * @property {(className: string, method: string, args: any[]) => Promise<any>} handleCall
  * @property {(kind: string, data: any, client: object) => void} [onUplink]
+ * @property {(op: string, payload: any, client: object) => Promise<any>} [onAdmin] - `admin` frames;
+ *   absent means every one of them is answered with an `admin-unsupported` error
  * @property {() => object} [describe] - extra fields for the `welcome` frame
  * @property {(message: string, detail?: any) => void} [log]
  */
@@ -58,6 +60,7 @@ export function createHubServer(options) {
         tls = null,
         handleCall,
         onUplink = () => {},
+        onAdmin = null,
         describe = () => ({}),
         log = () => {}
     } = options;
@@ -200,6 +203,28 @@ export function createHubServer(options) {
             case FrameType.UPLINK:
                 onUplink(frame.p?.kind, frame.p?.data, socket);
                 break;
+
+            case FrameType.ADMIN: {
+                try {
+                    if (!onAdmin) {
+                        const error = new Error('This Hub does not support admin operations');
+                        error.code = 'admin-unsupported';
+                        throw error;
+                    }
+                    const value = await onAdmin(frame.p?.op, frame.p?.payload ?? {}, socket);
+                    await sendSealed(socket, { i: frame.i, t: FrameType.RESULT, p: value ?? null });
+                } catch (err) {
+                    await sendSealed(socket, {
+                        i: frame.i,
+                        t: FrameType.ERROR,
+                        p: {
+                            message: err instanceof Error ? err.message : String(err),
+                            code: err?.code ?? 'admin-error'
+                        }
+                    });
+                }
+                break;
+            }
 
             case FrameType.PING:
                 await sendSealed(socket, { i: frame.i, t: FrameType.PONG });
