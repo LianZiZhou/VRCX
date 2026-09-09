@@ -35,6 +35,7 @@
         "prod": "vite build src && npm run build:licenses",
         "build-hub": "node ./build-scripts/build-hub.js",
         "hub-merge-offline": "node ./build-scripts/hub-merge-offline.js",
+        "hub-migrate": "node ./src/hub/migrate/cli.js",
         "package-hub": "node ./build-scripts/package-hub.js",
         "build-electron": "node ./build-scripts/download-dotnet-runtime.js --arch=x64 && node ./build-scripts/patch-package-version.js && cross-env DEBUG=electron-builder electron-builder --config electron-builder.config.js --x64 --publish never",
         "build-electron-arm64": "node ./build-scripts/download-dotnet-runtime.js --arch=arm64 && node ./build-scripts/patch-package-version.js && electron-builder --config electron-builder.config.js --arm64 --publish never",

@@ -40,7 +40,7 @@ export default defineConfig(({ mode }) => {
         build: {
             // `ssr` rather than `lib`: it implies the node platform and gives
             // control over which dependencies stay external.
-            ssr: 'hub/main.js',
+            ssr: true,
             outDir: '../build/hub',
             emptyOutDir: true,
             target: 'node24',
@@ -48,7 +48,14 @@ export default defineConfig(({ mode }) => {
             minify: false,
             sourcemap: true,
             rollupOptions: {
-                output: { entryFileNames: 'main.js' }
+                input: {
+                    // The Hub itself, and the migration/backup tool that ships
+                    // beside it. The tool shares the protocol and channel code
+                    // with the Hub, which Rollup puts in a common chunk.
+                    main: resolve(here, 'hub/main.js'),
+                    migrate: resolve(here, 'hub/migrate/cli.js')
+                },
+                output: { entryFileNames: '[name].js' }
             }
         },
         ssr: {
