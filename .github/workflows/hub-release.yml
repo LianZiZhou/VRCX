@@ -1,4 +1,5 @@
-# [hub] Builds the release artifacts: the Hub zips, and the client.
+# [hub] Builds the release artifacts: the Hub zips, the migration tool, and
+# the client.
 #
 # Separate from hub.yml because this is expensive. hub.yml runs on every push
 # to the branch; this one is asked for.
@@ -108,11 +109,14 @@ jobs:
 
       - run: npm ci
 
+      # The platform-independent tool zip is built by its own job below, so
+      # only this platform's Node-bundled one is made here.
       - name: Package
         run: >-
           node ./build-scripts/package-hub.js
           --platforms=${{ matrix.platform }}
           --variants=${{ needs.prepare.outputs.variants }}
+          --tool=full
 
       # package-hub.js already checks each staged tree (right assemblies, right
       # native SQLite, and the bundled Node's ELF/Mach-O/PE header matching the
@@ -127,14 +131,15 @@ jobs:
             echo "--- $zip"
             unzip -t "$zip" > /dev/null
             case "$zip" in
-              *linux*|*osx*)
-                perms=$(unzip -Z "$zip" | grep '/start-hub\.sh$' | awk '{print $1}')
-                echo "    start-hub.sh $perms"
-                case "$perms" in
-                  -rwx*) ;;
-                  *) echo "::error::$zip: start-hub.sh is not executable"; exit 1 ;;
-                esac
-                ;;
+              vrcx-hub-migrate-*linux*|vrcx-hub-migrate-*osx*) launcher=vrcx-hub-migrate.sh ;;
+              *linux*|*osx*) launcher=start-hub.sh ;;
+              *) continue ;;
+            esac
+            perms=$(unzip -Z "$zip" | grep "/$launcher\$" | awk '{print $1}')
+            echo "    $launcher $perms"
+            case "$perms" in
+              -rwx*) ;;
+              *) echo "::error::$zip: $launcher is not executable"; exit 1 ;;
             esac
           done
 
@@ -146,7 +151,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: vrcx-hub-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}-full
-          path: build/dist/*-${{ matrix.platform }}-full.zip
+          path: build/dist/vrcx-hub-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}-full.zip
           if-no-files-found: ignore
           retention-days: 14
           # Already compressed.
@@ -156,8 +161,38 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: vrcx-hub-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}-slim
-          path: build/dist/*-${{ matrix.platform }}-slim.zip
+          path: build/dist/vrcx-hub-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}-slim.zip
           if-no-files-found: ignore
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload the migration tool (with Node)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vrcx-hub-migrate-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}-full
+          path: build/dist/vrcx-hub-migrate-*-${{ matrix.platform }}-full.zip
+          retention-days: 14
+          compression-level: 0
+
+  # The migration tool without Node: one zip that runs on any platform, so
+  # it is built once rather than once per platform.
+  tool:
+    name: Migration tool
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: npm
+      - run: npm ci
+      - run: node ./build-scripts/package-hub.js --tool-only --tool=any
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vrcx-hub-migrate-${{ needs.prepare.outputs.version }}-any
+          path: build/dist/vrcx-hub-migrate-*-any.zip
           retention-days: 14
           compression-level: 0
 
@@ -165,7 +200,7 @@ jobs:
   # produce on their own.
   checksums:
     name: Checksums
-    needs: [prepare, hub]
+    needs: [prepare, hub, tool]
     runs-on: ubuntu-latest
     steps:
       - name: Collect every Hub zip
