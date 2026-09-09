@@ -56,18 +56,28 @@ jobs:
     name: Hub lint and format
     runs-on: ubuntu-latest
     steps:
+      # .editorconfig declares `end_of_line = crlf` for every file, and oxfmt
+      # honours it. Git stores the sources LF-normalised (`* text=auto`), so a
+      # default Linux checkout hands oxfmt LF files that it then rejects -- all
+      # of them, which is what made this look like a config problem rather than
+      # a line-ending one. Confirmed by taking a tree checked out as LF and
+      # adding .editorconfig to it: 46 of 46 files flip from passing to
+      # failing, and converting the same tree to CRLF flips them back.
+      #
+      # Checking out CRLF makes the runner match what the repo declares, and
+      # matches what a Windows checkout already produces, so CI and a
+      # developer's local run agree about what "formatted" means.
+      - name: Match the line endings .editorconfig asks for
+        run: git config --global core.autocrlf true
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
           node-version: lts/*
           cache: npm
       - run: npm ci
-      # Both tools get `-c` and are called through node_modules/.bin rather
-      # than npx. With config discovery left implicit, the runner formatted
-      # against oxfmt's defaults -- 80 columns, two spaces, double quotes --
-      # and flagged nearly every Hub file, while byte-identical content and
-      # the same oxfmt 0.60.0 passed locally. Naming the file removes the
-      # question rather than depending on how discovery behaves here.
+      # Both tools are given `-c` and invoked through node_modules/.bin rather
+      # than npx, so neither config nor binary resolution depends on the
+      # environment.
       - name: Oxlint
         run: >-
           ./node_modules/.bin/oxlint -c .oxlintrc.json
@@ -91,19 +101,12 @@ jobs:
             exit 0
           fi
 
-          # A job log needs admin rights on the repository to download;
-          # annotations do not. So on failure the facts needed to diagnose this
-          # go out as annotations, kept to a handful of lines because GitHub
-          # only surfaces the first ten per step.
-          {
-            echo "cwd=$PWD config=$(ls -l .oxfmtrc.json 2>&1 | tail -c 60)"
-            echo "oxfmt=$(./node_modules/.bin/oxfmt --version 2>&1 | head -1)"
-            echo "--- oxfmt --check said:"
-            head -n 6 fmt.log
-          } > diag.txt
+          # Downloading a job log needs admin rights on the repository;
+          # annotations do not. Only the first ten per step are surfaced.
           cat fmt.log
-          cat diag.txt
-          while IFS= read -r line; do echo "::error::$line"; done < diag.txt
+          head -n 8 fmt.log | while IFS= read -r line; do
+            echo "::error::oxfmt: $line"
+          done
           exit 1
 
   build:
