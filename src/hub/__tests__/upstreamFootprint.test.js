@@ -90,9 +90,12 @@ function isHubOwned(path) {
         path === 'src/vite.hub.config.js' ||
         path === 'build-scripts/build-hub.js' ||
         path === 'build-scripts/hub-merge-offline.js' ||
+        path === 'build-scripts/hub-archive.js' ||
+        path === 'build-scripts/package-hub.js' ||
         // A new workflow file cannot conflict with upstream, so it counts as
         // ours even though it lives in an upstream directory.
         path === '.github/workflows/hub.yml' ||
+        path === '.github/workflows/hub-release.yml' ||
         path.startsWith('docker/') ||
         path === 'package-lock.json'
     );

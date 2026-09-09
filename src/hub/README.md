@@ -55,7 +55,49 @@ follow the database to the Hub, which is the intended behaviour.
 
 ## Running the Hub
 
-### Prerequisites
+### From a release zip
+
+`npm run package-hub` builds archives that unpack and run with nothing else
+installed, six platforms with two variants each:
+
+|           |                                                                       |
+| --------- | --------------------------------------------------------------------- |
+| Platforms | `linux-x64` `linux-arm64` `win-x64` `win-arm64` `osx-x64` `osx-arm64` |
+| `full`    | bundles Node too, so nothing at all is required (~82-98 MB)           |
+| `slim`    | expects Node 24.15+ on `PATH` (~50-55 MB)                             |
+
+```bash
+npm run package-hub                               # all twelve, into build/dist/
+npm run package-hub -- --platforms=linux-arm64    # or just one
+npm run package-hub -- --variants=slim
+```
+
+Unpack it and run `./start-hub.sh`, or `start-hub.cmd` on Windows. The launcher
+changes into its own directory first, because the Hub resolves `dotnet/` and
+`dotnet-runtime/` relative to the working directory.
+
+Both variants carry a private .NET runtime, which the Hub prefers over any
+system install. The startup log says which runtimes it actually got:
+
+```
+[hub] Node 24.20.0 on win32-x64
+[hub] .NET bridge ready (SQLite, WebApi, VRCXStorage) on .NET 10.0.12 [bundled]
+```
+
+That private runtime is a requirement, not a convenience: `node-api-dotnet`
+starts the CLR through hostfxr instead of launching a .NET executable, so the
+runtime files a `--self-contained` publish leaves next to `VRCX.dll` are never
+read. hostfxr does honour `DOTNET_ROOT`, and `server/nativeBridge.js` points it
+at the bundled copy.
+
+One machine cross-builds all six platforms, so `package-hub.js` verifies what
+it cannot run: the right native SQLite for the RID, the generated interop shim,
+the other five platforms' native hosts pruned, the bundled Node's ELF/Mach-O/PE
+header matching the target architecture, and -- by reading the finished zip
+back -- `start-hub.sh` keeping its executable bit. CI does the same through
+`.github/workflows/hub-release.yml`.
+
+### Prerequisites (running from a checkout)
 
 - Node 24+
 - The .NET 10 runtime
