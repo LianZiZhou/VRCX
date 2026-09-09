@@ -1,11 +1,7 @@
-# [hub] Builds the release zips.
+# [hub] Builds the release artifacts: the Hub zips, and the client.
 #
-# Separate from hub.yml because this is expensive: twelve archives, and around
-# 1.5 GB of .NET runtimes and Node builds to fetch. hub.yml runs on every push
+# Separate from hub.yml because this is expensive. hub.yml runs on every push
 # to the branch; this one is asked for.
-#
-# It uploads artifacts and stops there. Attaching them to a public release is
-# left as a deliberate manual step.
 #
 # Two ways in. A tag is the one that works from this branch:
 #
@@ -16,7 +12,10 @@
 # offered for workflows present on the repository's default branch -- which
 # here is `master`, where this file does not exist. It is kept for whenever
 # that stops being true.
-name: Hub release zips
+#
+# Everything is uploaded as artifacts; attaching them to a public release is
+# left as a deliberate manual step.
+name: Hub release
 
 on:
   push:
@@ -32,16 +31,56 @@ on:
         description: '"full" bundles Node, "slim" expects it on PATH'
         required: false
         default: 'full,slim'
+      client:
+        description: 'Also build the desktop client (Windows setup, AppImages, dmgs)'
+        type: boolean
+        required: false
+        default: true
 
 permissions:
   contents: read
 
 jobs:
-  package:
-    name: Package
+  # Turns the comma-separated inputs into a matrix, and reads the version once
+  # so every artifact name agrees on it.
+  prepare:
+    name: Plan
     runs-on: ubuntu-latest
-    # Twelve archives, each with its own dotnet publish.
-    timeout-minutes: 60
+    outputs:
+      platforms: ${{ steps.plan.outputs.platforms }}
+      version: ${{ steps.plan.outputs.version }}
+      variants: ${{ steps.plan.outputs.variants }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: plan
+        run: |
+          set -euo pipefail
+          # Double quotes around the substitution: inside a GitHub expression
+          # single quotes delimit the string literal, so they cannot also be
+          # the shell's quoting.
+          platforms="${{ inputs.platforms || 'linux-x64,linux-arm64,win-x64,win-arm64,osx-x64,osx-arm64' }}"
+          variants="${{ inputs.variants || 'full,slim' }}"
+
+          {
+            echo "platforms=$(node -e 'console.log(JSON.stringify(process.argv[1].split(",").filter(Boolean)))' "$platforms")"
+            echo "variants=$variants"
+            echo "version=$(tr -d '[:space:]' < Version)"
+          } >> "$GITHUB_OUTPUT"
+
+          cat "$GITHUB_OUTPUT"
+
+  # One job per platform rather than per platform-and-variant: both variants
+  # share a checkout, an npm ci and a downloaded runtime, and each still comes
+  # out as its own artifact.
+  hub:
+    name: Hub ${{ matrix.platform }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(needs.prepare.outputs.platforms) }}
     steps:
       - uses: actions/checkout@v6
 
@@ -58,39 +97,34 @@ jobs:
           dotnet-version: '10.0.x'
 
       # The .NET runtimes and Node builds are immutable once published, so a
-      # hit here saves the whole download.
+      # hit here saves the whole download. Keyed per platform because each job
+      # only ever fetches its own.
       - name: Cache downloaded runtimes
         uses: actions/cache@v4
         with:
           path: build/.cache
-          key: hub-release-runtimes-${{ hashFiles('.github/workflows/hub-release.yml') }}
-          restore-keys: hub-release-runtimes-
+          key: hub-runtimes-${{ matrix.platform }}-${{ hashFiles('Version') }}
+          restore-keys: hub-runtimes-${{ matrix.platform }}-
 
       - run: npm ci
 
-      # Cheap, and a failure here is much easier to read than one surfacing
-      # halfway through packaging.
-      - run: npm run test:hub
-
-      # `inputs.*` is empty on a tag push, so each falls back to everything.
       - name: Package
         run: >-
           node ./build-scripts/package-hub.js
-          --platforms=${{ inputs.platforms || 'linux-x64,linux-arm64,win-x64,win-arm64,osx-x64,osx-arm64' }}
-          --variants=${{ inputs.variants || 'full,slim' }}
+          --platforms=${{ matrix.platform }}
+          --variants=${{ needs.prepare.outputs.variants }}
 
       # package-hub.js already checks each staged tree (right assemblies, right
       # native SQLite, and the bundled Node's ELF/Mach-O/PE header matching the
       # target architecture) and re-reads each zip to confirm start-hub.sh kept
       # its executable bit. This is the independent read-back.
-      - name: Inspect the finished archives
+      - name: Inspect the archives
         run: |
           set -euo pipefail
           cd build/dist
           ls -la
           for zip in *.zip; do
             echo "--- $zip"
-            # Fails the job if the archive is not well-formed.
             unzip -t "$zip" > /dev/null
             case "$zip" in
               *linux*|*osx*)
@@ -103,15 +137,70 @@ jobs:
                 ;;
             esac
           done
-          echo
-          cat SHA256SUMS.txt
 
-      - name: Upload archives
+      # Uploaded one zip at a time. A single upload covering them all would
+      # arrive as one archive-of-archives, which is not what anyone wants to
+      # download. `if-no-files-found: ignore` covers a run that asked for only
+      # one variant.
+      - name: Upload full
         uses: actions/upload-artifact@v4
         with:
-          name: vrcx-hub-release
-          path: |
-            build/dist/*.zip
-            build/dist/SHA256SUMS.txt
+          name: vrcx-hub-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}-full
+          path: build/dist/*-${{ matrix.platform }}-full.zip
+          if-no-files-found: ignore
+          retention-days: 14
+          # Already compressed.
+          compression-level: 0
+
+      - name: Upload slim
+        uses: actions/upload-artifact@v4
+        with:
+          name: vrcx-hub-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}-slim
+          path: build/dist/*-${{ matrix.platform }}-slim.zip
+          if-no-files-found: ignore
           retention-days: 14
           compression-level: 0
+
+  # One checksum file covering every zip, which the per-platform jobs cannot
+  # produce on their own.
+  checksums:
+    name: Checksums
+    needs: [prepare, hub]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect every Hub zip
+        uses: actions/download-artifact@v4
+        with:
+          pattern: vrcx-hub-*
+          path: dist
+          merge-multiple: true
+      - name: Hash them
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum *.zip | tee SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SHA256SUMS
+          path: dist/SHA256SUMS.txt
+          retention-days: 14
+
+  # The desktop client, built from this branch so it carries the Hub's client
+  # side -- mirror mode, the uplink and the disconnect handling.
+  #
+  # Reuses the repository's own release workflow rather than restating it:
+  # that is where the Cef build, the NSIS installer, the AppImages and the dmgs
+  # are defined, and duplicating roughly three hundred lines of it here would
+  # start drifting immediately. Its code-signing steps are guarded on
+  # `secrets.AZURE_CLIENT_ID != ''`, so they skip on a fork with no secrets.
+  #
+  # The permissions are the ones that workflow declares for itself.
+  client:
+    name: Client
+    needs: prepare
+    if: ${{ inputs.client == null || inputs.client }}
+    uses: ./.github/workflows/github_actions.yml
+    permissions:
+      contents: write
+      id-token: write
+    secrets: inherit
