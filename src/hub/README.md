@@ -413,13 +413,14 @@ the shim does not cover.
 
 ### Upstream footprint
 
-Everything else is new files. The upstream tree is touched in seven places, each
+Everything else is new files. The upstream tree is touched in eight places, each
 a small guarded block marked `// [hub]`:
 
 | File                             | What                                              |
 | -------------------------------- | ------------------------------------------------- |
 | `src/plugins/interopApi.js`      | attempt the Hub, rebind `SQLite`/`WebApi`         |
 | `src/services/database/index.js` | wrap the export in the suppression proxy          |
+| `src/services/request.js`        | report an Error's message, not `{}` (upstreamable) |
 | `src/services/websocket.js`      | relay pipeline messages; mirrors do not connect   |
 | `src/stores/updateLoop.js`       | gate timers by mode; uplink instead of processing |
 | `src/stores/vrcx.js`             | Hub owns the schema; uplink Photon events         |
