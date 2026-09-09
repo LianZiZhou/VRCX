@@ -91,7 +91,10 @@ read. hostfxr does honour `DOTNET_ROOT`, and `server/nativeBridge.js` points it
 at the bundled copy.
 
 One machine cross-builds all six platforms, so `package-hub.js` verifies what
-it cannot run: the right native SQLite for the RID, the generated interop shim,
+it cannot run: the right native SQLite for the RID (and its architecture, read
+from the file header -- the arm64 zips are published from
+`VRCX-Electron-arm64.csproj`, whose System.Data.SQLite has an arm64 native
+library; the x64 project's does not), the generated interop shim,
 the other five platforms' native hosts pruned, the bundled Node's ELF/Mach-O/PE
 header matching the target architecture, and -- by reading the finished zip
 back -- `start-hub.sh` keeping its executable bit.
