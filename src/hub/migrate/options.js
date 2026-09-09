@@ -11,7 +11,7 @@ import { resolve } from 'node:path';
 
 import { defaultDataDir, readStorage } from './dataDir.js';
 
-export const COMMANDS = ['migrate', 'backup', 'restore', 'info', 'help'];
+export const COMMANDS = ['migrate', 'backup', 'restore', 'info', 'gui', 'help'];
 
 const DEFAULT_PORT = 9001;
 
@@ -150,6 +150,7 @@ vrcx-hub-migrate - move VRCX data to a Hub, and back it up
   vrcx-hub-migrate backup   [--from=<dir> | --hub=<addr>] [--to=<dir>]
   vrcx-hub-migrate restore  --from=<backup> [--to=<dir>] [--with-token]
   vrcx-hub-migrate info     [--from=<dir>] [--hub=<addr>]
+  vrcx-hub-migrate gui      [--port=<n>] [--no-open]
 
 Commands
   migrate   snapshot a VRCX data directory (or a backup) and send it to a Hub,
@@ -157,6 +158,8 @@ Commands
   backup    take a consistent copy of a VRCX data directory, or of a running Hub
   restore   put a backup's database back into a data directory (VRCX or Hub must be stopped)
   info      show what a data directory holds, and what the Hub is running
+  gui       the same four, as a page in your browser (the launchers open it when
+            run with no arguments, e.g. by double-clicking vrcx-hub-migrate.cmd)
 
 Where things come from
   --from=<dir>        a VRCX data directory, or a backup made by this tool

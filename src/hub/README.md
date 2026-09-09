@@ -312,6 +312,28 @@ three keys to add by hand if it cannot write them.
 The Hub refuses a database whose schema is newer than it can migrate. An older
 one is fine: the Hub migrates it on boot, as it owns the schema.
 
+### The browser page
+
+The same four operations are available as a page in the browser, for people
+who would rather not use a terminal:
+
+```bash
+vrcx-hub-migrate gui
+```
+
+The release launchers open it when run with no arguments, so on Windows a
+double-click on `vrcx-hub-migrate.cmd` is all it takes. It is `node:http`
+serving one inline page on `127.0.0.1` and opening the system browser on it --
+no Electron, no dependencies, ~30 KB. Progress and the yes/no questions come
+over Server-Sent Events. The page is in English or Chinese, following the
+browser's language.
+
+Every request needs a random token minted at launch (in the page's URL, and
+in a header on the API), so a web page in the same browser cannot drive it;
+the `Host` header is checked against the loopback address to defeat DNS
+rebinding; and the process exits after fifteen idle minutes or from the page's
+Quit button. `migrate/gui/server.js` is the whole of it.
+
 ### Backups
 
 ```bash
