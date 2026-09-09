@@ -11,6 +11,7 @@ import { createAdminHandler } from './adminHandler.js';
 import { createInteropHandler } from './interopHandler.js';
 import { createNativeBridge, shutdownNativeBridge } from './nativeBridge.js';
 import { createStatusServer } from './statusServer.js';
+import { diagnoseVrchatReachability } from './networkCheck.js';
 import { EventType } from '../shared/protocol.js';
 import { HubMode, setHubMode } from '../shared/mode.js';
 import { HUB_USAGE, loadHubConfig, RESTART_EXIT_CODE } from './config.js';
@@ -290,8 +291,25 @@ export async function runHub(options = {}) {
     // --- start collecting -------------------------------------------------
     // Last, so that a client connecting during sign-in already has a socket to
     // connect to and sees the session events as they happen.
+    const shutdown = new AbortController();
     if (startRuntime) {
-        const databaseReady = await startHubRuntime(stores);
+        const databaseReady = await startHubRuntime(stores, {
+            log,
+            signal: shutdown.signal,
+            // A sign-in that fails with no HTTP status never left the .NET
+            // side. Say whether the box can reach VRChat at all, since on a
+            // headless machine that is the whole question.
+            onSignInFailure: async (err) => {
+                if (err?.status && err.status > 0) {
+                    return;
+                }
+                const report = await diagnoseVrchatReachability({ configDir: config.configDir });
+                log(report.detail);
+                for (const line of report.advice) {
+                    log(`  ${line}`);
+                }
+            }
+        });
         if (!databaseReady) {
             log('Database did not initialise; the Hub is up but will not collect.');
         }
@@ -307,6 +325,7 @@ export async function runHub(options = {}) {
         }
         stopping = true;
         log('Shutting down');
+        shutdown.abort();
         clearInterval(sessionTimer);
         setPipelineObserver(null);
         await server.stop();

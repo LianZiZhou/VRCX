@@ -71,7 +71,12 @@ export function installExtraGlobals() {
                 once: () => {},
                 send: () => {},
                 invoke: async () => undefined
-            }
+            },
+            // stores/vrcxUpdater.js asks for these at start-up and logs the
+            // first. A Hub cannot replace its own files, so the updater is
+            // told to stand down rather than fetch release notes every boot.
+            getArch: async () => process.arch,
+            getNoUpdater: async () => true
         },
         {
             get(target, prop) {

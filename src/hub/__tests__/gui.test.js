@@ -24,6 +24,12 @@ let gui;
 
 beforeAll(async () => {
     work = mkdtempSync(join(tmpdir(), 'vrcx-hub-gui-'));
+    // The tool's defaults come from this machine's VRCX.json and environment.
+    // A developer whose VRCX is already attached to a Hub would otherwise see
+    // `info` try to reach that Hub from inside the test.
+    process.env.XDG_CONFIG_HOME = join(work, 'xdg');
+    delete process.env.VRCX_HUB_URL;
+    delete process.env.VRCX_HUB_TOKEN;
     gui = await startGui({ open: false, exit: false });
 });
 
