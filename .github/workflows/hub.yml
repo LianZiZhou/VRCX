@@ -63,18 +63,31 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Oxlint
-        run: npx oxlint src/hub
+        run: npx oxlint src/hub build-scripts/hub-archive.js build-scripts/package-hub.js
       - name: ESLint
         run: >-
           npx eslint src/hub vitest.hub.config.js src/vite.hub.config.js
           build-scripts/build-hub.js build-scripts/hub-merge-offline.js
+          build-scripts/hub-archive.js build-scripts/package-hub.js
       # Hub-owned paths only. Running the formatter over an upstream file
       # rewrites the whole thing -- which is exactly what the footprint test
       # exists to catch -- so this must never widen to cover them.
+      #
+      # oxfmt names the offending files on stdout, which is buried in the job
+      # log. Re-emitting them as ::error:: puts them in the run's annotations,
+      # where they show up against the diff and can be read without pulling
+      # the whole log down.
       - name: Format (Hub-owned files only)
-        run: >-
-          npx oxfmt --check src/hub vitest.hub.config.js src/vite.hub.config.js
-          build-scripts/build-hub.js build-scripts/hub-merge-offline.js
+        run: |
+          if npx oxfmt --check src/hub vitest.hub.config.js src/vite.hub.config.js               build-scripts/build-hub.js build-scripts/hub-merge-offline.js               build-scripts/hub-archive.js build-scripts/package-hub.js > fmt.log 2>&1; then
+            cat fmt.log
+            exit 0
+          fi
+          cat fmt.log
+          head -n 30 fmt.log | while IFS= read -r line; do
+            echo "::error::oxfmt: $line"
+          done
+          exit 1
 
   build:
     name: Hub bundle boots
