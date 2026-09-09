@@ -107,6 +107,103 @@ export function mountHubCore() {
     return { app, stores };
 }
 
+/** Sign-in retry backoff: first wait, and the cap it doubles up to. */
+const SIGN_IN_RETRY_MIN_MS = 30000;
+const SIGN_IN_RETRY_MAX_MS = 5 * 60 * 1000;
+
+/**
+ * @param {number} ms
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<void>}
+ */
+function sleep(ms, signal) {
+    return new Promise((resolve) => {
+        const timer = setTimeout(done, ms);
+        timer.unref?.();
+        function done() {
+            signal?.removeEventListener('abort', done);
+            clearTimeout(timer);
+            resolve();
+        }
+        signal?.addEventListener('abort', done, { once: true });
+    });
+}
+
+/**
+ * @typedef {object} RuntimeOptions
+ * @property {(message: string) => void} [log]
+ * @property {(error: Error) => Promise<void> | void} [onSignInFailure] - called once, on the first failure
+ * @property {AbortSignal} [signal] - stops the retries (the Hub is shutting down)
+ * @property {{ minMs?: number, maxMs?: number }} [retry]
+ */
+
+/**
+ * Sign in from the stored credentials, and keep trying if VRChat cannot be
+ * reached.
+ *
+ * On the desktop a failed start-up sign-in leaves the user at the login
+ * dialog to click again. A Hub has nobody to click, and the usual cause on a
+ * freshly set-up box is a network that is not there yet: DNS still coming
+ * up, a proxy, a missing CA store. So the first attempt is awaited -- a Hub
+ * that can sign in should be signed in before it starts serving clients --
+ * and further attempts run in the background with a doubling delay.
+ *
+ * `getCurrentUser` failures are not seen here: `autoLoginAfterMounted`
+ * already catches them and hands them to the update loop's own retry.
+ *
+ * @param {object} stores
+ * @param {RuntimeOptions} options
+ * @returns {Promise<void>}
+ */
+async function signInWithRetry(stores, options) {
+    const { log = () => {}, onSignInFailure = null, signal = null, retry = {} } = options;
+    const minMs = retry.minMs ?? SIGN_IN_RETRY_MIN_MS;
+    const maxMs = retry.maxMs ?? SIGN_IN_RETRY_MAX_MS;
+
+    let attempt = 0;
+    let delay = minMs;
+    /** @returns {Promise<boolean>} */
+    const attemptSignIn = async () => {
+        attempt += 1;
+        try {
+            await stores.auth.autoLoginAfterMounted();
+            return true;
+        } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
+            log(`Sign-in attempt ${attempt} failed: ${detail.split('\n')[0]}`);
+            if (attempt === 1) {
+                try {
+                    await onSignInFailure?.(err);
+                } catch {
+                    // Diagnostics must never take the Hub down.
+                }
+            }
+            return false;
+        }
+    };
+
+    if (await attemptSignIn()) {
+        return;
+    }
+
+    // Deliberately not awaited: the Hub goes on to serve clients and accept
+    // an import while VRChat is unreachable.
+    (async () => {
+        while (!signal?.aborted && !stores.user.currentUser?.id) {
+            log(`Retrying sign-in in ${Math.round(delay / 1000)}s`);
+            await sleep(delay, signal);
+            if (signal?.aborted) {
+                return;
+            }
+            if (await attemptSignIn()) {
+                log('Signed in.');
+                return;
+            }
+            delay = Math.min(delay * 2, maxMs);
+        }
+    })().catch((err) => log(`Sign-in retry loop stopped: ${err?.message ?? err}`));
+}
+
 /**
  * Start the periodic work and sign in.
  *
@@ -119,9 +216,10 @@ export function mountHubCore() {
  * sleeps for ten seconds tailing log files, so none of them belong here.
  *
  * @param {object} stores
+ * @param {RuntimeOptions} [options]
  * @returns {Promise<boolean>} whether the database came up
  */
-export async function startHubRuntime(stores) {
+export async function startHubRuntime(stores, options = {}) {
     stores.updateLoop.updateLoop();
 
     const databaseReady = await stores.vrcx.waitForDatabaseInit();
@@ -132,7 +230,7 @@ export async function startHubRuntime(stores) {
     // Signs in from the stored credentials. The pipeline socket follows on its
     // own: stores/auth.js watches `watchState.isFriendsLoaded` and calls
     // initWebsocket() when it flips.
-    await stores.auth.autoLoginAfterMounted();
+    await signInWithRetry(stores, options);
     return true;
 }
 
