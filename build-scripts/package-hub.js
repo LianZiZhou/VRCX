@@ -63,10 +63,10 @@ const VARIANTS = ['full', 'slim'];
  * @param {string[]} argv
  */
 function parseArgs(argv) {
-    /** @param {string} name @param {string} fallback */
-    const value = (name, fallback) =>
+    /** @param {string} flag @param {string} fallback */
+    const value = (flag, fallback) =>
         argv
-            .find((a) => a.startsWith(`--${name}=`))
+            .find((a) => a.startsWith(`--${flag}=`))
             ?.split('=')
             .slice(1)
             .join('=') ?? fallback;
@@ -122,16 +122,16 @@ async function fetchJson(url) {
  * @returns {Promise<string>} path to the cached file
  */
 async function download(spec) {
-    const { url, name, digest, algorithm } = spec;
+    const { url, name: fileName, digest, algorithm } = spec;
     mkdirSync(cacheDir, { recursive: true });
-    const dest = join(cacheDir, name);
+    const dest = join(cacheDir, fileName);
 
     if (existsSync(dest) && hashFile(dest, algorithm) === digest.toLowerCase()) {
-        console.log(`  cached  ${name}`);
+        console.log(`  cached  ${fileName}`);
         return dest;
     }
 
-    process.stdout.write(`  fetch   ${name} ... `);
+    process.stdout.write(`  fetch   ${fileName} ... `);
     const response = await fetch(url);
     if (!response.ok) {
         throw new Error(`GET ${url} -> ${response.status}`);
@@ -141,7 +141,7 @@ async function download(spec) {
     const actual = hashFile(dest, algorithm);
     if (actual !== digest.toLowerCase()) {
         rmSync(dest, { force: true });
-        throw new Error(`${name}: ${algorithm} mismatch (expected ${digest}, got ${actual})`);
+        throw new Error(`${fileName}: ${algorithm} mismatch (expected ${digest}, got ${actual})`);
     }
     console.log(`${(statSync(dest).size / 1048576).toFixed(1)} MB, ${algorithm} ok`);
     return dest;
@@ -203,21 +203,26 @@ async function resolveNode(requested) {
     /** @type {Map<string, string>} */
     const sums = new Map();
     for (const line of (await response.text()).split('\n')) {
-        const [digest, name] = line.trim().split(/\s+/);
-        if (digest && name) {
-            sums.set(name, digest);
+        const [digest, fileName] = line.trim().split(/\s+/);
+        if (digest && fileName) {
+            sums.set(fileName, digest);
         }
     }
 
     /** @type {Record<string, { url: string, name: string, digest: string, algorithm: 'sha256' }>} */
     const files = {};
     for (const [platform, info] of Object.entries(PLATFORMS)) {
-        const name = `node-v${version}-${info.nodeName}.${info.nodeExt}`;
-        const digest = sums.get(name);
+        const fileName = `node-v${version}-${info.nodeName}.${info.nodeExt}`;
+        const digest = sums.get(fileName);
         if (!digest) {
-            throw new Error(`Node ${version} has no ${name}`);
+            throw new Error(`Node ${version} has no ${fileName}`);
         }
-        files[platform] = { url: `${NODE_DIST}/v${version}/${name}`, name, digest, algorithm: 'sha256' };
+        files[platform] = {
+            url: `${NODE_DIST}/v${version}/${fileName}`,
+            name: fileName,
+            digest,
+            algorithm: 'sha256'
+        };
     }
     return { version, files };
 }
@@ -492,7 +497,9 @@ function machineOf(file, format) {
         throw new Error(`${file}: not a PE binary`);
     }
     const peOffset = head.readUInt32LE(0x3c);
-    if (head.toString('latin1', peOffset, peOffset + 4) !== 'PE  ') {
+    // The PE signature as a little-endian word, rather than a string that
+    // would need two NULs in the source.
+    if (head.readUInt32LE(peOffset) !== 0x00004550) {
         throw new Error(`${file}: no PE header`);
     }
     return head.readUInt16LE(peOffset + 4);
@@ -555,10 +562,10 @@ function verifyStage(stage, platform, variant, dotnetVersion) {
 async function buildOne(options) {
     const { platform, variant, version, bundleDir, depsDir, dotnet, node, outDir } = options;
     const info = PLATFORMS[platform];
-    const name = `vrcx-hub-${version}-${platform}-${variant}`;
-    const stage = join(rootDir, 'build', '.stage', name);
+    const archiveName = `vrcx-hub-${version}-${platform}-${variant}`;
+    const stage = join(rootDir, 'build', '.stage', archiveName);
 
-    console.log(`\n${name}`);
+    console.log(`\n${archiveName}`);
     rmSync(stage, { recursive: true, force: true });
     mkdirSync(stage, { recursive: true });
 
@@ -614,7 +621,7 @@ async function buildOne(options) {
     }
 
     const scriptInfo = { nodeVersion: node.version, dotnetVersion: dotnet.version, bundled: variant === 'full' };
-    // `start-hub` rather than plain `start`: an explicit name is easier to
+    // `start-hub` rather than plain `start`: an explicit archiveName is easier to
     // pick out of the directory listing and cannot be misread as cmd.exe's
     // `start` built-in.
     if (info.windows) {
@@ -632,13 +639,13 @@ async function buildOne(options) {
 
     // Everything sits under one top-level directory so unzipping into a
     // downloads folder does not scatter files across it.
-    const wrapper = join(rootDir, 'build', '.stage', `${name}-wrapper`);
+    const wrapper = join(rootDir, 'build', '.stage', `${archiveName}-wrapper`);
     rmSync(wrapper, { recursive: true, force: true });
     mkdirSync(wrapper, { recursive: true });
-    cpSync(stage, join(wrapper, name), { recursive: true });
+    cpSync(stage, join(wrapper, archiveName), { recursive: true });
 
     process.stdout.write('  zip ... ');
-    const zipPath = join(outDir, `${name}.zip`);
+    const zipPath = join(outDir, `${archiveName}.zip`);
     const result = zipDirectory(wrapper, zipPath, (rel) =>
         modeFor(rel.split('\\').join('/').split('/').slice(1).join('/'))
     );
@@ -648,19 +655,19 @@ async function buildOne(options) {
     // Read the archive back: the launcher's executable bit only exists inside
     // the zip, so nothing before this point can confirm it survived.
     if (!info.windows) {
-        const launcher = `${name}/start-hub.sh`;
+        const launcher = `${archiveName}/start-hub.sh`;
         const entry = listZip(zipPath).find((e) => e.name === launcher);
         if (!entry) {
-            throw new Error(`${name}: ${launcher} is not in the archive`);
+            throw new Error(`${archiveName}: ${launcher} is not in the archive`);
         }
         if ((entry.mode & 0o111) === 0) {
-            throw new Error(`${name}: ${launcher} is not executable (mode ${entry.mode.toString(8)})`);
+            throw new Error(`${archiveName}: ${launcher} is not executable (mode ${entry.mode.toString(8)})`);
         }
     }
 
     const megabytes = (result.bytes / 1048576).toFixed(1);
     console.log(`${result.files} files, ${megabytes} MB`);
-    return { name: `${name}.zip`, path: zipPath, bytes: result.bytes, files: result.files };
+    return { name: `${archiveName}.zip`, path: zipPath, bytes: result.bytes, files: result.files };
 }
 
 async function main() {
