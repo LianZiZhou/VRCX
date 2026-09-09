@@ -249,7 +249,8 @@ different content and different per-user table prefixes.
 
 **Data written offline diverges.** A client running standalone writes to its own
 local database, and nothing merges that back on its own. To fold it in, copy the
-client's `VRCX.sqlite3` to the Hub machine, stop the Hub, and run:
+client's `VRCX.sqlite3` to the Hub machine (or take one with
+`vrcx-hub-migrate backup`), stop the Hub, and run:
 
 ```bash
 npm run hub-merge-offline -- --client-db=/tmp/offline-VRCX.sqlite3
@@ -260,6 +261,113 @@ Dotnet/DBMerger/DBMerger.csproj -c Release -r linux-arm64`). It refuses to run
 while the Hub is listening — DBMerger opens both files directly and would race
 the Hub's writes — and it always takes a timestamped backup of the Hub database
 into `backups/` before touching anything.
+
+---
+
+## Moving your data in, and backups
+
+A freshly started Hub has an empty database and no VRChat session. Rather than
+signing in again and starting the friend log from zero, move the desktop VRCX's
+data onto it. `vrcx-hub-migrate` does that, and doubles as the backup tool for
+both a desktop VRCX and a Hub. It ships in every Hub release zip (`migrate.js`
+with a `vrcx-hub-migrate.sh`/`.cmd` launcher), on its own as
+`vrcx-hub-migrate-<version>-any.zip` (needs Node 24.15+) and
+`vrcx-hub-migrate-<version>-<platform>-full.zip` (bundles Node) from the same
+release run, and runs from a checkout with `npm run hub-migrate -- <command>`.
+The `any` zip is also produced by Hub CI on every push.
+
+The whole of a VRCX install that is worth moving is one file, `VRCX.sqlite3`.
+The VRChat session cookies live in it too (`WebApi` keeps them in the `cookies`
+table), so a migrated Hub comes up already signed in as you. `VRCX.json` holds
+per-machine settings and stays where it is.
+
+### Migrate
+
+On the PC where VRCX lives, with the Hub running:
+
+```bash
+vrcx-hub-migrate migrate --hub=192.168.1.50 --token=<the Hub's token> --configure-client
+```
+
+That takes a consistent snapshot of the local database (VRCX may be running,
+though closing it first avoids losing whatever it writes afterwards), uploads it
+over the encrypted Hub link, and the Hub:
+
+1. stages the file in `<config>/import-pending/`,
+2. exits with code 75, which the release launchers, systemd's `Restart=always`
+   and a Docker `--restart` policy all treat as "start me again",
+3. on the way back up, moves its previous database into `<config>/backups/`,
+   puts the upload in its place, opens it, runs any schema migrations, and
+   signs in with the stored session.
+
+The tool waits for the Hub to come back and reports who it signed in as. Run by
+hand without a supervisor, the Hub simply exits and applies the import on its
+next start; the tool says so.
+
+`--configure-client` writes the Hub address and token into the local `VRCX.json`
+so that VRCX attaches to the Hub on its next start. VRCX must be closed for
+that, because it rewrites `VRCX.json` on exit; the tool checks, and prints the
+three keys to add by hand if it cannot write them.
+
+The Hub refuses a database whose schema is newer than it can migrate. An older
+one is fine: the Hub migrates it on boot, as it owns the schema.
+
+### Backups
+
+```bash
+vrcx-hub-migrate backup                                       # this machine's VRCX
+vrcx-hub-migrate backup --hub=192.168.1.50 --token=<token>    # the Hub, over the network
+vrcx-hub-migrate backup --from=/var/lib/vrcx-hub              # a Hub, on the Hub box
+```
+
+A backup is a directory, not an archive: `VRCX.sqlite3` (a self-contained
+snapshot, taken with SQLite's online backup API so it is consistent even while
+the source is being written to), `manifest.json` (source, digests, schema
+version, users), and for reference `VRCX.json` and, from a Hub, `hub-token`.
+Restoring by hand is copying the one file back.
+
+With the tool:
+
+```bash
+vrcx-hub-migrate restore --from=<backup>                      # into this machine's VRCX (closed)
+vrcx-hub-migrate restore --from=<backup> --to=/var/lib/vrcx-hub --with-token   # a Hub, stopped
+vrcx-hub-migrate migrate --from=<backup> --hub=<addr>         # onto a running Hub
+```
+
+`restore` keeps whatever it replaces in `backups/` beside the database, as does
+the Hub when it applies an import. `info` shows what a data directory or backup
+holds and, given `--hub`, what the Hub is running:
+
+```bash
+vrcx-hub-migrate info --hub=192.168.1.50 --token=<token>
+```
+
+### Address and token defaults
+
+`--hub` accepts a host, `host:port` or a full `ws://` URL. When it is omitted the
+tool uses `VRCX_HUB_URL`, then `VRCX_HubUrl` from the local `VRCX.json`; the
+token comes from `--token`, `--token-file`, `VRCX_HUB_TOKEN`, then
+`VRCX_HubToken` from the same file. A VRCX that is already attached to a Hub
+therefore needs no flags at all.
+
+### How it is wired
+
+The transfers ride the existing sealed channel as a new `admin` frame
+(`shared/protocol.js`, `AdminOp`), handled by `server/adminHandler.js`. It needs
+no second credential: a holder of the token already has unrestricted SQL
+through `call`. The Hub advertises `admin: true` in its `welcome` frame and the
+tool refuses a Hub that does not.
+
+Applying an import at boot rather than in place is deliberate. The .NET side
+holds one connection for the life of the process and the data core has the
+file's contents loaded into its stores; swapping underneath both would mean
+reaching into upstream initialisation paths. `server/pendingImport.js` runs
+before anything opens the database, and `RESTART_EXIT_CODE` in
+`server/config.js` is the contract with the launchers.
+
+Snapshots use Node's built-in `node:sqlite` (`migrate/snapshot.js`), loaded
+lazily and only there. It is what allows a backup of a running VRCX and a
+snapshot of a collecting Hub without stopping either.
 
 ---
 
@@ -291,6 +399,6 @@ a small guarded block marked `// [hub]`:
 | `src/stores/updateLoop.js`       | gate timers by mode; uplink instead of processing |
 | `src/stores/vrcx.js`             | Hub owns the schema; uplink Photon events         |
 | `vitest.config.js`               | exclude the Hub suite (it has its own config)     |
-| `package.json`                   | two scripts, four dev dependencies                |
+| `package.json`                   | three scripts, four dev dependencies              |
 
 `git log -S'[hub]'` finds all of them. `Dotnet/` is untouched.
