@@ -97,8 +97,7 @@ jobs:
           # only surfaces the first ten per step.
           {
             echo "cwd=$PWD config=$(ls -l .oxfmtrc.json 2>&1 | tail -c 60)"
-            echo "oxfmt=$(./node_modules/.bin/oxfmt --version 2>&1 | tr -d '
-')"
+            echo "oxfmt=$(./node_modules/.bin/oxfmt --version 2>&1 | head -1)"
             echo "--- oxfmt --check said:"
             head -n 6 fmt.log
           } > diag.txt
