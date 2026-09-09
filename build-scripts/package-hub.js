@@ -74,6 +74,11 @@ function parseArgs(argv) {
     const platforms = value('platforms', Object.keys(PLATFORMS).join(',')).split(',').filter(Boolean);
     const variants = value('variants', VARIANTS.join(',')).split(',').filter(Boolean);
 
+    if (platforms.length === 0 || variants.length === 0) {
+        // An empty --platforms= would otherwise build nothing and exit 0,
+        // which in CI looks exactly like success.
+        throw new Error('--platforms and --variants must each name at least one value');
+    }
     for (const platform of platforms) {
         if (!PLATFORMS[platform]) {
             throw new Error(`Unknown platform "${platform}". Known: ${Object.keys(PLATFORMS).join(', ')}`);
