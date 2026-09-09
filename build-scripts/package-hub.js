@@ -430,8 +430,12 @@ fi
 # VRCX Hub migration and backup tool.
 #
 # Runs from anywhere: paths given to it are relative to the current directory,
-# not to this script. \`vrcx-hub-migrate help\` lists the commands.
+# not to this script. \`vrcx-hub-migrate help\` lists the commands; with no
+# arguments at all it opens the browser page.
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ $# -eq 0 ]; then
+    set -- gui
+fi
 ${bundled}
 if ! command -v node >/dev/null 2>&1; then
     echo "vrcx-hub-migrate: no 'node' on PATH." >&2
@@ -497,7 +501,7 @@ function migrateBatchScript(info) {
     const bundled = info.bundled
         ? `
 if exist "%~dp0node\\node.exe" (
-    "%~dp0node\\node.exe" "%~dp0migrate.js" %*
+    "%~dp0node\\node.exe" "%~dp0migrate.js" %args%
     exit /b %errorlevel%
 )
 `
@@ -507,7 +511,11 @@ if exist "%~dp0node\\node.exe" (
 rem VRCX Hub migration and backup tool.
 rem
 rem Runs from anywhere: paths given to it are relative to the current directory,
-rem not to this script. "vrcx-hub-migrate help" lists the commands.
+rem not to this script. "vrcx-hub-migrate help" lists the commands; with no
+rem arguments at all (a double-click) it opens the browser page.
+setlocal
+set "args=%*"
+if "%args%"=="" set "args=gui"
 ${bundled}
 where node >nul 2>nul
 if errorlevel 1 (
@@ -516,7 +524,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-node "%~dp0migrate.js" %*
+node "%~dp0migrate.js" %args%
 `;
 }
 
@@ -551,7 +559,8 @@ Common flags (${run} --help lists them all):
 The status page answers on http://<host>:<status-port>/ and the same data as
 JSON at /status.json.
 
-Moving your data in, and backups (${windows ? 'vrcx-hub-migrate.cmd' : './vrcx-hub-migrate.sh'}):
+Moving your data in, and backups (${windows ? 'vrcx-hub-migrate.cmd' : './vrcx-hub-migrate.sh'};
+run it with no arguments, e.g. by double-clicking, for a page in your browser):
 
     vrcx-hub-migrate migrate --hub=<hub address> --token=<token>
         Run on the PC where VRCX lives. Copies its data -- database and VRChat
@@ -597,8 +606,10 @@ Moves a desktop VRCX's data onto a VRCX Hub, and backs up either.
 
 ${prereq}
 
-Run it from the PC where VRCX lives (${run}; on Windows without Node, the
-.cmd; on Linux/macOS, the .sh):
+Double-click ${run} (or run it with no arguments) for a page in your browser
+with the same operations as the commands below.
+
+From a terminal, on the PC where VRCX lives:
 
     vrcx-hub-migrate migrate --hub=<hub address> --token=<token>
         Copies this machine's VRCX data -- database and VRChat session -- onto
