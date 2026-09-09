@@ -1,7 +1,10 @@
 name: VRCX
 
 on:
-    - workflow_dispatch
+    workflow_dispatch:
+    # [hub] Lets the Hub's release pipeline reuse these jobs rather than
+    # copying them; see .github/workflows/hub-release.yml.
+    workflow_call:
 
 concurrency:
     group: ${{ github.ref }}
