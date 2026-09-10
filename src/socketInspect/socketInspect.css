@@ -82,6 +82,79 @@ body {
     color: var(--muted);
 }
 
+.modes {
+    display: inline-flex;
+    margin-right: 0.25rem;
+}
+
+.modes button {
+    border-radius: 0;
+}
+
+.modes button:first-child {
+    border-radius: 4px 0 0 4px;
+}
+
+.modes button:last-child {
+    border-radius: 0 4px 4px 0;
+    border-left: 0;
+}
+
+td.frame,
+th.frame {
+    width: 8.5rem;
+}
+
+td.frame-id,
+th.frame-id {
+    width: 3.5rem;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+}
+
+td.latency,
+th.latency {
+    width: 3.5rem;
+    text-align: right;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.badge.frame-call,
+.badge.frame-admin,
+.badge.frame-hello,
+.badge.frame-auth {
+    background: var(--out);
+}
+
+.badge.frame-result,
+.badge.frame-welcome,
+.badge.frame-challenge {
+    background: var(--in);
+}
+
+.badge.frame-error,
+.badge.frame-reject {
+    background: #f85149;
+}
+
+.badge.frame-event {
+    background: var(--hub);
+}
+
+.badge.frame-uplink {
+    background: var(--uplink);
+}
+
+.badge.frame-ping,
+.badge.frame-pong {
+    background: var(--muted);
+}
+
+.badge.frame-pipeline {
+    background: var(--vrchat);
+}
+
 .status {
     display: flex;
     gap: 1.25rem;

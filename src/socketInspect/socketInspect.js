@@ -13,7 +13,7 @@
 import './socketInspect.css';
 
 /** Rows kept in the window; older ones fall off the top. */
-const MAX_ROWS = 2000;
+const MAX_ROWS = 4000;
 /** The window is redrawn at most this often while messages stream in. */
 const RENDER_INTERVAL_MS = 100;
 /** Messages per second are measured over this window. */
@@ -28,7 +28,14 @@ const state = {
     /** what arrived while paused, applied on resume */
     held: [],
     autoscroll: true,
+    /**
+     * `messages`: what the app sees (pipeline, Hub events, uplinks).
+     * `frames`: what the wire carries -- every frame of the Hub link decoded,
+     * which is the DevTools network tab's binary blobs made readable.
+     */
+    mode: 'messages',
     channel: 'all',
+    direction: 'all',
     typeFilter: '',
     search: '',
     selectedId: null,
@@ -39,11 +46,20 @@ const state = {
 const root = document.getElementById('root');
 root.innerHTML = `
 <div class="toolbar">
+  <span class="modes">
+    <button id="mode-messages" class="active" title="Pipeline messages, Hub events and uplinks, as the app sees them">Messages</button>
+    <button id="mode-frames" title="Every frame of the Hub link, decoded: calls, results, events, ping/pong">All frames</button>
+  </span>
   <select id="channel" title="Channel">
     <option value="all">All channels</option>
     <option value="vrchat">VRChat pipeline</option>
     <option value="hub">Hub events</option>
     <option value="uplink">Uplink</option>
+  </select>
+  <select id="direction" title="Direction" hidden>
+    <option value="all">Both directions</option>
+    <option value="in">Received</option>
+    <option value="out">Sent</option>
   </select>
   <input id="type" type="search" placeholder="Type filter, e.g. friend-location" />
   <input id="search" type="search" placeholder="Search in payload" />
@@ -60,16 +76,7 @@ root.innerHTML = `
 <div class="main">
   <div class="list" id="list">
     <table>
-      <thead>
-        <tr>
-          <th class="time">Time</th>
-          <th class="channel">Channel</th>
-          <th class="dir">Dir</th>
-          <th class="type">Type</th>
-          <th class="size">Bytes</th>
-          <th>Preview</th>
-        </tr>
-      </thead>
+      <thead id="head"></thead>
       <tbody id="rows"></tbody>
     </table>
     <div class="empty" id="empty">Waiting for messages… Open VRCX's main window and let it talk.</div>
@@ -85,7 +92,11 @@ root.innerHTML = `
 </div>`;
 
 const el = {
+    modeMessages: document.getElementById('mode-messages'),
+    modeFrames: document.getElementById('mode-frames'),
     channel: document.getElementById('channel'),
+    direction: document.getElementById('direction'),
+    head: document.getElementById('head'),
     type: document.getElementById('type'),
     search: document.getElementById('search'),
     pause: document.getElementById('pause'),
@@ -147,6 +158,27 @@ function parsePayload(entry) {
             // Left as the string VRChat sent.
         }
     }
+    // A link frame carrying a relayed pipeline message: unwrap that too.
+    if (
+        entry.channel === 'link' &&
+        value?.t === 'event' &&
+        value.p?.event === 'pipeline' &&
+        typeof value.p.data === 'string'
+    ) {
+        try {
+            const inner = JSON.parse(value.p.data);
+            if (typeof inner.content === 'string') {
+                try {
+                    inner.content = JSON.parse(inner.content);
+                } catch {
+                    // As above.
+                }
+            }
+            value = { ...value, p: { ...value.p, data: inner } };
+        } catch {
+            // Not JSON; shown as sent.
+        }
+    }
     return value;
 }
 
@@ -177,10 +209,30 @@ function highlightJson(value) {
  * @returns {boolean}
  */
 function matches(entry) {
-    if (state.channel !== 'all' && entry.channel !== state.channel) {
-        return false;
+    if (state.mode === 'frames') {
+        // The link's frames, plus a directly connected pipeline socket's
+        // messages (a standalone client has no link; its pipeline *is* the
+        // wire). Relayed pipeline messages are already inside `event` frames.
+        const onWire = entry.channel === 'link' || (entry.channel === 'vrchat' && !entry.via);
+        if (!onWire) {
+            return false;
+        }
+        if (state.direction !== 'all' && entry.direction !== state.direction) {
+            return false;
+        }
+    } else {
+        if (entry.channel === 'link') {
+            return false;
+        }
+        if (state.channel !== 'all' && entry.channel !== state.channel) {
+            return false;
+        }
     }
-    if (state.typeFilter && !entry.type.toLowerCase().includes(state.typeFilter)) {
+    if (
+        state.typeFilter &&
+        !entry.type.toLowerCase().includes(state.typeFilter) &&
+        !(entry.summary ?? '').toLowerCase().includes(state.typeFilter)
+    ) {
         return false;
     }
     if (state.search && !entry.raw.toLowerCase().includes(state.search)) {
@@ -202,17 +254,33 @@ function scheduleRender() {
     }, RENDER_INTERVAL_MS);
 }
 
-function render() {
-    const visible = state.entries.filter(matches);
-    const typeCounts = new Map();
-    for (const entry of visible) {
-        typeCounts.set(entry.type, (typeCounts.get(entry.type) ?? 0) + 1);
-    }
+const HEADS = {
+    messages: `<tr>
+  <th class="time">Time</th>
+  <th class="channel">Channel</th>
+  <th class="dir">Dir</th>
+  <th class="type">Type</th>
+  <th class="size">Bytes</th>
+  <th>Preview</th>
+</tr>`,
+    frames: `<tr>
+  <th class="time">Time</th>
+  <th class="dir">Dir</th>
+  <th class="frame">Frame</th>
+  <th class="frame-id">#</th>
+  <th>Summary</th>
+  <th class="size">Wire</th>
+  <th class="latency">ms</th>
+</tr>`
+};
 
-    el.rows.innerHTML = visible
-        .map((entry) => {
-            const preview = entry.raw.length > 160 ? `${entry.raw.slice(0, 160)}…` : entry.raw;
-            return `<tr data-id="${entry.id}" class="${entry.id === state.selectedId ? 'selected' : ''}">
+/**
+ * @param {object} entry
+ * @returns {string}
+ */
+function messageRow(entry) {
+    const preview = entry.raw.length > 160 ? `${entry.raw.slice(0, 160)}…` : entry.raw;
+    return `<tr data-id="${entry.id}" class="${entry.id === state.selectedId ? 'selected' : ''}">
   <td class="time">${formatTime(entry.at)}</td>
   <td class="channel"><span class="badge ${entry.channel}">${entry.channel}</span>${entry.via ? ` <span class="preview">via ${escapeHtml(entry.via)}</span>` : ''}</td>
   <td class="dir ${entry.direction}">${entry.direction === 'in' ? '◀' : '▶'}</td>
@@ -220,8 +288,38 @@ function render() {
   <td class="size">${entry.size}</td>
   <td class="preview" title="${escapeHtml(preview)}">${escapeHtml(preview)}</td>
 </tr>`;
-        })
-        .join('');
+}
+
+/**
+ * @param {object} entry
+ * @returns {string}
+ */
+function frameRow(entry) {
+    const isLink = entry.channel === 'link';
+    const summary = isLink ? (entry.summary ?? '') : entry.raw.length > 160 ? `${entry.raw.slice(0, 160)}…` : entry.raw;
+    const frameType = isLink ? entry.type : `pipeline ${entry.type}`;
+    const wire = isLink ? (entry.wireBytes ?? entry.size) : entry.size;
+    const latency = isLink && entry.latencyMs !== null && entry.latencyMs !== undefined ? entry.latencyMs : '';
+    return `<tr data-id="${entry.id}" class="${entry.id === state.selectedId ? 'selected' : ''}">
+  <td class="time">${formatTime(entry.at)}</td>
+  <td class="dir ${entry.direction}">${entry.direction === 'in' ? '◀' : '▶'}</td>
+  <td class="frame"><span class="badge frame-${isLink ? escapeHtml(entry.type) : 'pipeline'}">${escapeHtml(frameType)}</span></td>
+  <td class="frame-id">${entry.frameId ?? ''}</td>
+  <td class="preview" title="${escapeHtml(summary)}">${escapeHtml(summary)}</td>
+  <td class="size">${wire}</td>
+  <td class="latency">${latency}</td>
+</tr>`;
+}
+
+function render() {
+    const visible = state.entries.filter(matches);
+    const typeCounts = new Map();
+    for (const entry of visible) {
+        typeCounts.set(entry.type, (typeCounts.get(entry.type) ?? 0) + 1);
+    }
+
+    el.head.innerHTML = HEADS[state.mode];
+    el.rows.innerHTML = visible.map(state.mode === 'frames' ? frameRow : messageRow).join('');
     el.empty.hidden = visible.length > 0;
     el.shown.textContent = String(visible.length);
     el.received.textContent = state.dropped
@@ -254,7 +352,11 @@ function select(entry) {
     }
     const via = entry.via ? ` via ${entry.via}` : '';
     const cut = entry.truncated ? ` (showing the first ${entry.raw.length} of ${entry.size} bytes)` : '';
-    el.detailTitle.textContent = `${formatTime(entry.at)}  ${entry.channel}${via}  ${entry.direction}  ${entry.type}${cut}`;
+    const frame =
+        entry.channel === 'link'
+            ? ` #${entry.frameId ?? '-'}  ${entry.wireBytes ?? '?'} B on the wire${entry.latencyMs !== null && entry.latencyMs !== undefined ? `  ${entry.latencyMs} ms` : ''}`
+            : '';
+    el.detailTitle.textContent = `${formatTime(entry.at)}  ${entry.channel}${via}  ${entry.direction}  ${entry.type}${frame}${cut}`;
     el.detail.innerHTML = highlightJson(parsePayload(entry));
     el.copy.hidden = false;
     for (const row of el.rows.querySelectorAll('tr')) {
@@ -309,8 +411,30 @@ function push(json) {
     }
 }
 
+/**
+ * @param {'messages' | 'frames'} mode
+ */
+function setMode(mode) {
+    state.mode = mode;
+    el.modeMessages.classList.toggle('active', mode === 'messages');
+    el.modeFrames.classList.toggle('active', mode === 'frames');
+    el.channel.hidden = mode === 'frames';
+    el.direction.hidden = mode !== 'frames';
+    el.type.placeholder =
+        mode === 'frames'
+            ? 'Filter frame type or summary, e.g. call, SELECT, auth/user'
+            : 'Type filter, e.g. friend-location';
+    select(null);
+}
+
+el.modeMessages.addEventListener('click', () => setMode('messages'));
+el.modeFrames.addEventListener('click', () => setMode('frames'));
 el.channel.addEventListener('change', () => {
     state.channel = el.channel.value;
+    render();
+});
+el.direction.addEventListener('change', () => {
+    state.direction = el.direction.value;
     render();
 });
 el.type.addEventListener('input', () => {
