@@ -309,6 +309,17 @@ reloads the window rather than swapping the database underneath a running app
 — the two databases hold different content and different per-user table
 prefixes.
 
+**Socket Inspect.** The tray icon's menu has a "Socket Inspect" entry beside
+DevTools (Windows). It opens a window that shows the main window's socket
+traffic live -- the VRChat pipeline as this client received it, the Hub
+link's events, and this machine's uplinks -- with filters by channel, type
+and text, pause, and a pretty-printed detail pane. The main window records
+the last 500 messages regardless (`client/socketInspector.js`, tapped in
+`shared/pipelineRelay.js`), so the window opens with history; the tap into
+the window is only on while it is open. The page is `src/socket-inspect.html`
+and the window `Dotnet/Cef/SocketInspectForm.cs`; the Electron build has no
+tray entry for it yet.
+
 **Known limits.** `initUserTables` still runs on every mirror at login (some
 forty idempotent `CREATE … IF NOT EXISTS` statements; a mirror may be the
 first to sign in a user the Hub has never seen). VRChat registry backups are

@@ -46,11 +46,15 @@ const ALLOWANCE = {
     'src/services/request.js': 14,
     'src/services/websocket.js': 25,
     'src/stores/updateLoop.js': 60,
-    'src/stores/vrcx.js': 44
+    'src/stores/vrcx.js': 44,
+    // The Socket Inspect window: one more Vite entry, one more tray item.
+    'src/vite.config.js': 4,
+    'Dotnet/Cef/MainForm.Designer.cs': 16,
+    'Dotnet/Cef/MainForm.cs': 10
 };
 
 /** Total across every upstream file. */
-const TOTAL_ALLOWANCE = 210;
+const TOTAL_ALLOWANCE = 240;
 
 /**
  * @returns {string | null} a base commit to diff against, or null if we cannot
@@ -112,7 +116,12 @@ function isHubOwned(path) {
         path === '.github/workflows/hub.yml' ||
         path === '.github/workflows/hub-release.yml' ||
         path.startsWith('docker/') ||
-        path === 'package-lock.json'
+        path === 'package-lock.json' ||
+        // The Socket Inspect window: new files beside upstream ones.
+        path === 'src/socket-inspect.html' ||
+        path.startsWith('src/socketInspect/') ||
+        path === 'Dotnet/Cef/SocketInspectForm.cs' ||
+        path === 'Dotnet/AppApi/Cef/SocketInspect.cs'
     );
 }
 
