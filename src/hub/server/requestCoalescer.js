@@ -54,16 +54,16 @@ export function withRequestCoalescing(handler, options = {}) {
 
     const stats = { calls: 0, coalesced: 0, cacheHits: 0 };
 
-    const wrapped = async function handleCall(className, method, args = []) {
+    const wrapped = async function handleCall(className, method, args = [], client = undefined) {
         const isHttp = className === 'WebApi' && (method === 'Execute' || method === 'ExecuteJson');
         const requestOptions = isHttp && typeof args[0] === 'string' ? safeParse(args[0]) : args[0];
 
         if (!isHttp || !isCoalescableGet(requestOptions)) {
-            return handler(className, method, args);
+            return handler(className, method, args, client);
         }
 
         stats.calls++;
-        const key = requestOptions.url;
+        const key = coalescingKey(requestOptions);
 
         if (ttlMs > 0) {
             const cached = cache.get(key);
@@ -79,7 +79,7 @@ export function withRequestCoalescing(handler, options = {}) {
             return pending;
         }
 
-        const promise = handler(className, method, args)
+        const promise = handler(className, method, args, client)
             .then((value) => {
                 if (ttlMs > 0) {
                     cache.set(key, { at: now(), value });
@@ -96,6 +96,27 @@ export function withRequestCoalescing(handler, options = {}) {
 
     wrapped.stats = stats;
     return wrapped;
+}
+
+/**
+ * Two requests may only share a response when nothing but timing separates
+ * them. `services/request.js#buildRequestInit` puts a GET's params into the
+ * URL and sets no headers, so today the URL alone would do; the method and
+ * headers are in the key so an upstream change that adds a header to a GET
+ * (a different `Accept`, say) cannot silently hand one caller another's
+ * response.
+ *
+ * @param {any} options
+ * @returns {string}
+ */
+export function coalescingKey(options) {
+    const method = (options.method ?? 'GET').toUpperCase();
+    const headers = options.headers && typeof options.headers === 'object' ? options.headers : {};
+    const sortedHeaders = Object.keys(headers)
+        .sort()
+        .map((name) => `${name.toLowerCase()}=${String(headers[name])}`)
+        .join('&');
+    return `${method} ${options.url} ${sortedHeaders}`;
 }
 
 /**

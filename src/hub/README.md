@@ -176,8 +176,14 @@ above):
 
 On startup the client tries the Hub for three seconds. If it connects and the
 database schema versions match, it becomes a mirror. If anything fails — no
-settings, unreachable, wrong token, schema mismatch — it runs as an ordinary
-standalone VRCX against its own local database, and says so in the console.
+settings, unreachable, wrong token, schema or protocol mismatch — it runs as an
+ordinary standalone VRCX against its own local database, and says so in the
+console.
+
+**Upgrade the Hub first.** The wire protocol is versioned and a mismatched
+pair is refused outright, and a refused mirror falls back to standalone and
+starts writing to its own local database. So: close the mirror, replace and
+start the Hub, then update and start the mirror.
 
 **Signing in is done from a client.** The Hub has no login UI on purpose. Attach
 a client, sign in as usual (the request travels to the Hub, whose cookie jar it
@@ -204,7 +210,10 @@ trying not to grow.
 
 So instead:
 
-- Client and server each send a random nonce in the clear.
+- Client and server each send a random nonce in the clear. The client's
+  `hello` also carries a random `clientId`, generated once per process, so the
+  Hub can tell a reconnect from a second machine; it is an identifier, not a
+  credential.
 - Both derive two AES-256-GCM keys with HKDF-SHA256 over the shared token,
   salted with both nonces — one key per direction.
 - The client proves it holds the token by sending a sealed frame. The token
@@ -232,34 +241,82 @@ fine for same-process IPC and not fine for a network.)
 friend log, notifications, game log, Photon-derived moderation. Mirror clients
 have those suppressed at the single point where the `database` object is
 exported. User-initiated writes (memos, notes, tags, local favourites,
-deletions, settings) still go through to the Hub's database as normal.
+deletions, settings) still go through to the Hub's database as normal. A few
+methods serve both kinds of caller and are decided per call
+(`shared/derivedWrites.js`): a friend request the person sent is written, a
+friendship the pipeline reported is not.
 
-**Local data goes up, not sideways.** Game log lines, Photon events and
-game-running state can only be collected on the machine actually running
-VRChat. Clients uplink them; the Hub processes each once and echoes the result
-to everyone, including the sender. That way there is one writer and one code
-path. The uplink hooks sit in the coordinators, because on Windows the C#
-side calls `$pinia.gameLog.addGameLogEvent` directly rather than going through
-the update loop. The Hub applies the game state itself, so the session the
-activity views are built on opens and closes there, and clears it when the
-client that reported it disconnects.
+**Local data goes up, not sideways.** Game log lines, the start-up backlog
+(what VRChat logged while VRCX was closed), Photon events and game-running
+state can only be collected on the machine actually running VRChat. Clients
+uplink them; the Hub processes each once and echoes the result to everyone,
+including the sender. That way there is one writer and one code path. The
+uplink hooks sit in the coordinators, because on Windows the C# side calls
+`$pinia.gameLog.addGameLogEvent` directly rather than going through the update
+loop. While the link is down, what a client collects is queued (bounded) and
+sent, in order, when the link is back. Machine-only IPC — `vrcx://` links,
+custom tags — stays on the machine (`shared/ipcRouting.js`).
 
-**Schema is Hub-owned.** Migrations and `VACUUM` run only on the Hub. C# holds a
-single SQLite connection behind one lock, so several clients migrating the same
-database would stall each other at best. The handshake compares schema versions
-and refuses to attach on a mismatch rather than writing malformed rows.
+**Game state is per client.** Whether VRChat is running is a fact about a
+machine. The Hub keeps one entry per attached client, keyed by its `clientId`,
+and its own `isGameRunning` — which opens and closes the session the activity
+views are built on and gates the game log handlers — is the OR over them. A
+client whose link drops keeps its entry for 90 seconds, so a Wi-Fi blip is not
+recorded as leaving the instance, and a client re-announces its state on every
+(re)connect. The aggregate is broadcast as `game-state`, but a mirror never
+applies it to its own game store: a laptop attached to the Hub does not
+believe the game is running because the desktop's is.
+
+**A mirror starts late, on purpose.** The link is up before the app is.
+Relayed pipeline messages are dropped until the friends list is loaded —
+upstream opens its socket only then, and the REST snapshot taken at login is
+the truth — while the Hub's echoes of machine-local data are held until the
+stores exist and then replayed in order. After a link outage the mirror
+refreshes notifications and friends, the same repair upstream does after an
+unclean socket close.
+
+**Settings follow the database, and the Hub follows the settings.** Every
+store reads `configs` once at construction; the Hub watches the `configs`
+writes that arrive over the link and re-reads the keys that decide what it
+writes (game log on or off, auto status change, the logging toggles), so a
+switch flipped on a mirror takes effect on the Hub without a restart
+(`server/configSync.js`). The status page shows the effective values.
+
+**Schema is Hub-owned.** Migrations and `PRAGMA optimize` run only on the Hub.
+C# holds a single SQLite connection behind one lock, so several clients
+migrating the same database would stall each other at best. The handshake
+compares schema versions and refuses to attach on a mismatch rather than
+writing malformed rows. On that one connection, `BEGIN … COMMIT` sequences
+from different processes would interleave, so the Hub leases the connection to
+whoever began a transaction until they end it (`server/sqliteGate.js`), and
+rolls back a lease nobody released after 30 seconds.
 
 **Rate limits.** Every client runs its own update loop and its own pipeline
 handling, so one event can make N clients fetch the same resource on one shared
 VRChat session. The Hub coalesces concurrent identical GETs. Auth endpoints are
 never shared. A short response cache exists but is off by default; turn it on
-only if 429s actually appear.
+only if 429s actually appear. Only `*.vrchat.cloud` (and the Hub's API
+endpoint) is routed through the Hub; third-party requests — the update check,
+avatar providers, image previews — run on the client. The account's automatic
+status change runs on the Hub only.
 
-**Offline fallback.** The Hub broadcasts its VRChat cookies to clients as they
-change, so a client that loses the Hub can fall back to standalone without a
-fresh login and a 2FA prompt. Switching modes reloads the window rather than
-swapping the database underneath a running app — the two databases hold
-different content and different per-user table prefixes.
+**Offline fallback.** The Hub sends its VRChat cookies to each client as it
+attaches and broadcasts them as they change, so a client that loses the Hub
+can fall back to standalone without a fresh login and a 2FA prompt. A 401 on a
+mirror is left to the Hub to repair — the session is the Hub's — and the
+mirror re-fetches the user once the Hub says it is back. Switching modes
+reloads the window rather than swapping the database underneath a running app
+— the two databases hold different content and different per-user table
+prefixes.
+
+**Known limits.** `initUserTables` still runs on every mirror at login (some
+forty idempotent `CREATE … IF NOT EXISTS` statements; a mirror may be the
+first to sign in a user the Hub has never seen). VRChat registry backups are
+per machine but keep their bookkeeping in the shared `configs` table, so with
+more than one mirror only one of them will back up. The primary password
+setting and upstream's three-auto-logins-per-hour rule both apply to the Hub's
+own sign-in; the Hub says so in its log and keeps retrying, and a client
+signing in wakes it.
 
 **Data written offline diverges.** A client running standalone writes to its own
 local database, and nothing merges that back on its own. To fold it in, copy the
@@ -424,20 +481,21 @@ the shim does not cover.
 
 ### Upstream footprint
 
-Everything else is new files. The upstream tree is touched in ten places, each
-a small guarded block marked `// [hub]`:
+Everything else is new files. The upstream tree is touched in eleven places,
+each a small guarded block marked `// [hub]`:
 
-| File                                     | What                                               |
-| ---------------------------------------- | -------------------------------------------------- |
-| `src/plugins/interopApi.js`              | attempt the Hub, rebind `SQLite`/`WebApi`          |
-| `src/coordinators/gameLogCoordinator.js` | mirror: send the line up instead of processing it  |
-| `src/coordinators/gameCoordinator.js`    | mirror: tell the Hub the game state                |
-| `src/services/database/index.js`         | wrap the export in the suppression proxy           |
-| `src/services/request.js`                | report an Error's message, not `{}` (upstreamable) |
-| `src/services/websocket.js`              | relay pipeline messages; mirrors do not connect    |
-| `src/stores/updateLoop.js`               | gate timers by mode; uplink instead of processing  |
-| `src/stores/vrcx.js`                     | Hub owns the schema; uplink Photon events          |
-| `vitest.config.js`                       | exclude the Hub suite (it has its own config)      |
-| `package.json`                           | three scripts, four dev dependencies               |
+| File                                      | What                                                                                       |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `src/plugins/interopApi.js`               | attempt the Hub, rebind `SQLite`/`WebApi`                                                  |
+| `src/coordinators/gameLogCoordinator.js`  | mirror: send lines and the start-up backlog up                                             |
+| `src/coordinators/gameCoordinator.js`     | mirror: tell the Hub the game state; crash row goes up                                     |
+| `src/coordinators/locationCoordinator.js` | mirror: last location from memory, not the Hub's DB                                        |
+| `src/services/database/index.js`          | wrap the export in the suppression proxy                                                   |
+| `src/services/request.js`                 | report an Error's message, not `{}`; 401 is the Hub's                                      |
+| `src/services/websocket.js`               | relay pipeline messages; mirrors do not connect                                            |
+| `src/stores/updateLoop.js`                | gate timers by mode: no Discord on the Hub, no status change or cache eviction on a mirror |
+| `src/stores/vrcx.js`                      | Hub owns the schema; uplink Photon events before login too                                 |
+| `vitest.config.js`                        | exclude the Hub suite (it has its own config)                                              |
+| `package.json`                            | three scripts, four dev dependencies                                                       |
 
 `git log -S'[hub]'` finds all of them. `Dotnet/` is untouched.

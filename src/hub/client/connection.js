@@ -33,6 +33,13 @@ const HANDSHAKE_TIMEOUT_MS = 15000;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 
+/**
+ * One id per client process, sent in every `hello`. The Hub keys per-client
+ * state (game state, uplink counters) on it, so a reconnect after a link blip
+ * is recognised as the same machine rather than a new one.
+ */
+export const CLIENT_ID = randomNonce();
+
 export const ConnectionState = {
     IDLE: 'idle',
     CONNECTING: 'connecting',
@@ -89,6 +96,14 @@ export function createHubConnection(options) {
     let sealer = null;
     let opener = null;
     let clientNonce = null;
+
+    /** Where the Hub is, for error messages that would otherwise read as local. */
+    let hostLabel = url;
+    try {
+        hostLabel = new URL(url).host || url;
+    } catch {
+        // Keep the raw URL; it is only used in a message.
+    }
 
     /** @type {Map<number, {resolve: Function, reject: Function, timer: any}>} */
     const pending = new Map();
@@ -226,8 +241,13 @@ export function createHubConnection(options) {
                 if (entry) {
                     pending.delete(frame.i);
                     clearTimeout(entry.timer);
-                    const error = new Error(frame.p?.message ?? 'Hub call failed');
+                    // The message is the Hub's (a full disk, a locked
+                    // database). `services/sqlite.js` matches on substrings
+                    // and shows a dialog, which must not read as if it were
+                    // about this machine's disk.
+                    const error = new Error(`Hub (${hostLabel}): ${frame.p?.message ?? 'Hub call failed'}`);
                     error.code = frame.p?.code;
+                    error.hubMessage = frame.p?.message;
                     entry.reject(error);
                 }
                 break;
@@ -261,6 +281,10 @@ export function createHubConnection(options) {
             resolve = res;
             reject = rej;
         });
+        // Every caller of connect() handles the rejection, but the socket can
+        // close between a caller giving up and the handshake settling; an
+        // unobserved rejection must not take a Node host down.
+        promise.catch(() => {});
         handshake = { promise, resolve, reject };
 
         socket = new WebSocketImpl(url);
@@ -277,7 +301,7 @@ export function createHubConnection(options) {
             socket.send(
                 encodeFrame({
                     t: FrameType.HELLO,
-                    p: { protocol: PROTOCOL_VERSION, client: clientName, clientNonce }
+                    p: { protocol: PROTOCOL_VERSION, client: clientName, clientNonce, clientId: CLIENT_ID }
                 })
             );
         };
@@ -334,6 +358,11 @@ export function createHubConnection(options) {
         /** @returns {object | null} the `welcome` payload from the current session */
         get info() {
             return welcomeInfo;
+        },
+
+        /** @returns {string} this process's stable client id */
+        get clientId() {
+            return CLIENT_ID;
         },
 
         /**
@@ -400,19 +429,22 @@ export function createHubConnection(options) {
          * to the Hub. Fire and forget: the Hub persists it and echoes it back
          * as a broadcast event.
          *
+         * Answers synchronously whether the frame was handed to the socket.
+         * `client/uplink.js` queues what could not be sent and flushes it on
+         * the next `ready`, so a link blip must not silently swallow data.
+         *
          * @param {string} kind
          * @param {any} data
-         * @returns {Promise<void>}
+         * @returns {boolean} false when the link is not ready
          */
-        async uplink(kind, data) {
+        uplink(kind, data) {
             if (state !== ConnectionState.READY || !socket) {
-                return;
+                return false;
             }
-            try {
-                await sendSealed({ t: FrameType.UPLINK, p: { kind, data } });
-            } catch (err) {
+            sendSealed({ t: FrameType.UPLINK, p: { kind, data } }).catch((err) => {
                 console.error('[hub] Failed to uplink:', err);
-            }
+            });
+            return true;
         },
 
         close() {

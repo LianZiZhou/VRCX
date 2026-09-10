@@ -7,7 +7,13 @@
  * `LINUX` code path (ExecuteJson returning a JSON string).
  */
 
-const noopAsync = () => Promise.resolve('');
+/**
+ * Resolves to `undefined`, not `''`: several callers branch on the result
+ * (`if (result) return;`), and a stub that answers with a string means
+ * "false" to every one of them. `AppApi.VrcClosedGracefully` returning `''`
+ * had the Hub conclude VRChat crashed and write an Event row saying so.
+ */
+const noopAsync = () => Promise.resolve(undefined);
 
 /**
  * @returns {object} a Proxy whose every property is an async no-op
@@ -60,8 +66,17 @@ export function installNativeStubs() {
         CustomScript: async () => '',
         CustomCss: async () => '',
         GetVersion: async () => 'VRCX-Hub',
+        GetLaunchCommand: async () => '',
         IsGameRunning: async () => false,
-        IsSteamVRRunning: async () => false
+        IsSteamVRRunning: async () => false,
+        // The Hub has no local VRChat, so nothing it sees can be a crash.
+        // The crash check runs when the aggregate game state turns false,
+        // which on a Hub means a *client's* game closed -- gracefully or not,
+        // that client is the one to relaunch it.
+        VrcClosedGracefully: async () => true,
+        // Windows asks the C# side to re-announce game state through this;
+        // on the Hub game state arrives over the uplink instead.
+        CheckGameRunning: async () => {}
     });
 
     globalThis.LogWatcher = stubObject({
@@ -69,7 +84,11 @@ export function installNativeStubs() {
         GetLogLines: async () => []
     });
 
-    globalThis.Discord = stubObject();
+    globalThis.Discord = stubObject({
+        // `discordPresence.js` stores the return value as `isDiscordActive`;
+        // anything but a boolean makes it re-call Discord every tick.
+        SetActive: async () => false
+    });
     globalThis.AssetBundleManager = stubObject();
 
     if (typeof globalThis.window !== 'undefined') {

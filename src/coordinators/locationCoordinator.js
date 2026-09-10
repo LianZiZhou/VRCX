@@ -10,6 +10,8 @@ import { usePhotonStore } from '../stores/photon';
 import { useUserStore } from '../stores/user';
 import { useVrStore } from '../stores/vr';
 
+import { isMirrorMode } from '../hub/shared/mode.js'; // [hub]
+
 export function runUpdateCurrentUserLocationFlow() {
     const advancedSettingsStore = useAdvancedSettingsStore();
     const userStore = useUserStore();
@@ -77,7 +79,11 @@ export async function runSetCurrentUserLocationFlow(location, travelingToLocatio
         // with the current state of things, lets not run this if we don't need to
         return;
     }
-    const lastLocationArray = await database.lookupGameLogDatabase(['Location'], [], 1);
+    // [hub] A mirror would read the Hub's database while the Hub is still
+    // inserting this very row; its own last location is the answer it needs.
+    const lastLocationArray = isMirrorMode()
+        ? [{ location: locationStore.lastLocation.location }]
+        : await database.lookupGameLogDatabase(['Location'], [], 1);
     const lastLocationTemp = lastLocationArray.length > 0 ? lastLocationArray[0].location : '';
     if (lastLocationTemp === location) {
         return;

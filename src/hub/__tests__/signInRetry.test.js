@@ -9,8 +9,12 @@
 import { startHubRuntime } from '../bootstrap/core.js';
 import { diagnoseVrchatReachability } from '../server/networkCheck.js';
 
+/** An attempt that neither throws nor signs in: upstream's "stay at the login dialog". */
+const SILENT = Symbol('silent');
+
 /**
- * @param {Array<Error | null>} outcomes - per attempt: an error to throw, or null to succeed
+ * @param {Array<Error | null | typeof SILENT>} outcomes - per attempt: an error to throw,
+ *   SILENT to return without a user, or null to succeed
  */
 function fakeStores(outcomes) {
     const calls = { autoLogin: 0 };
@@ -18,11 +22,15 @@ function fakeStores(outcomes) {
         updateLoop: { updateLoop: () => {} },
         vrcx: { waitForDatabaseInit: async () => true },
         user: { currentUser: null },
+        advancedSettings: { enablePrimaryPassword: false },
         auth: {
             migrateStoredUsers: async () => {},
             autoLoginAfterMounted: async () => {
                 const outcome = outcomes[calls.autoLogin] ?? null;
                 calls.autoLogin += 1;
+                if (outcome === SILENT) {
+                    return;
+                }
                 if (outcome) {
                     throw outcome;
                 }
@@ -75,6 +83,37 @@ describe('sign-in at boot', () => {
         expect(log.filter((line) => /Sign-in attempt \d failed: Error Message/.test(line))).toHaveLength(2);
         expect(log.some((line) => /Retrying sign-in in/.test(line))).toBe(true);
         expect(log.at(-1)).toBe('Signed in.');
+    });
+
+    it('treats a silent non-sign-in as a failure and says why', async () => {
+        const { stores, calls } = fakeStores([SILENT, null]);
+        stores.advancedSettings.enablePrimaryPassword = true;
+        const log = [];
+        expect(await startHubRuntime(stores, { log: (line) => log.push(line), retry: { minMs: 5, maxMs: 10 } })).toBe(
+            true
+        );
+        expect(stores.user.currentUser).toBeNull();
+        expect(log[0]).toMatch(/did not sign in: the primary password is enabled/);
+        await until(() => stores.user.currentUser?.id === 'usr_x');
+        expect(calls.autoLogin).toBe(2);
+    });
+
+    it('can be woken out of its back-off when a client signs in', async () => {
+        const failing = new Error('down');
+        const { stores, calls } = fakeStores([failing, null]);
+        let controls = null;
+        await startHubRuntime(stores, {
+            retry: { minMs: 60000, maxMs: 60000 },
+            onRetryControls: (c) => {
+                controls = c;
+            }
+        });
+        expect(calls.autoLogin).toBe(1);
+        await until(() => controls !== null);
+        // Without the wake this would wait a minute.
+        controls.wake();
+        await until(() => stores.user.currentUser?.id === 'usr_x');
+        expect(calls.autoLogin).toBe(2);
     });
 
     it('stops retrying when the Hub shuts down', async () => {

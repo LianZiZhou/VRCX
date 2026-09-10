@@ -10,8 +10,10 @@
  */
 
 import {
+    ALLOWED_ON_MIRROR,
+    CONDITIONAL_WRITES,
     DERIVED_WRITES,
-    HUB_OWNED_CACHE_WRITES,
+    isSuppressedOnMirror,
     mirrorSuppressedMethods,
     SCHEMA_WRITES
 } from '../shared/derivedWrites.js';
@@ -25,7 +27,9 @@ describe('derived write list', () => {
     });
 
     it('names only methods that actually exist on the database object', () => {
-        const missing = [...mirrorSuppressedMethods()].filter((name) => typeof database[name] !== 'function');
+        const missing = [...mirrorSuppressedMethods(), ...ALLOWED_ON_MIRROR].filter(
+            (name) => typeof database[name] !== 'function'
+        );
         expect(
             missing,
             `these names are in the suppression list but not on \`database\` any more, ` +
@@ -60,18 +64,34 @@ describe('derived write list', () => {
         }
     });
 
-    it('separates derived, cache and schema writes', () => {
+    it('separates derived, allowed and schema writes', () => {
         // The read-modify-write counter: if both the Hub and a client ran it,
         // avatar time would double-count.
         expect(DERIVED_WRITES.has('addAvatarTimeSpent')).toBe(true);
-        // Idempotent but Hub-owned to avoid duplicate traffic.
-        expect(HUB_OWNED_CACHE_WRITES.has('addAvatarToCache')).toBe(true);
+        // INSERT OR REPLACE, and written together with a user's local
+        // favourite: suppressing it left favourites without names.
+        expect(ALLOWED_ON_MIRROR.has('addAvatarToCache')).toBe(true);
         expect(DERIVED_WRITES.has('addAvatarToCache')).toBe(false);
-        // Migrations plus VACUUM on a shared single-connection DB.
+        // Migrations on a shared single-connection DB.
         expect(SCHEMA_WRITES.has('upgradeDatabaseVersion')).toBe(true);
+        // The user's purge-and-compact must actually compact.
+        expect(SCHEMA_WRITES.has('vacuum')).toBe(false);
+        expect(ALLOWED_ON_MIRROR.has('vacuum')).toBe(true);
         // Photon-derived: only stores/photon.js writes these, and Photon
         // reaches the Hub through the client uplink.
         expect(DERIVED_WRITES.has('setModeration')).toBe(true);
+    });
+
+    it('tells a friend request the user sent from a friendship the pipeline reported', () => {
+        expect(Object.keys(CONDITIONAL_WRITES)).toEqual(['addFriendLogHistory']);
+        expect(isSuppressedOnMirror('addFriendLogHistory', [{ type: 'FriendRequest' }])).toBe(false);
+        expect(isSuppressedOnMirror('addFriendLogHistory', [{ type: 'CancelFriendRequest' }])).toBe(false);
+        expect(isSuppressedOnMirror('addFriendLogHistory', [{ type: 'Friend' }])).toBe(true);
+        expect(isSuppressedOnMirror('addFriendLogHistory', [{ type: 'Unfriend' }])).toBe(true);
+        expect(isSuppressedOnMirror('addFriendLogHistory', [])).toBe(true);
+        expect(isSuppressedOnMirror('addGPSToDatabase', [{}])).toBe(true);
+        expect(isSuppressedOnMirror('setFriendLogCurrent', [{}])).toBe(false);
+        expect(isSuppressedOnMirror('setUserMemo', ['x'])).toBe(false);
     });
 });
 
@@ -97,6 +117,14 @@ describe('database guard', () => {
                 // Mirrors tableAlter.js, which fans out through `this`.
                 await this.addGPSToDatabase('from-migration');
                 return 'migrated';
+            },
+            async addFriendLogHistory(row) {
+                calls.push(['addFriendLogHistory', row]);
+                return 'wrote-history';
+            },
+            async addWorldToCache(ref) {
+                calls.push(['addWorldToCache', ref]);
+                return 'cached';
             }
         };
     }
@@ -131,6 +159,22 @@ describe('database guard', () => {
 
         expect(fake.calls).toEqual([['setUserMemo', 'hi']]);
         expect(suppressionStats.byMethod.get('addGPSToDatabase')).toBe(1);
+    });
+
+    it('decides conditional writes on their arguments', async () => {
+        const fake = createFakeDatabase();
+        const guarded = guardDatabase(fake);
+        setHubMode(HubMode.MIRROR);
+
+        await expect(guarded.addFriendLogHistory({ type: 'Friend' })).resolves.toBeUndefined();
+        await expect(guarded.addFriendLogHistory({ type: 'FriendRequest' })).resolves.toBe('wrote-history');
+        await expect(guarded.addWorldToCache({ id: 'wrld_1' })).resolves.toBe('cached');
+
+        expect(fake.calls).toEqual([
+            ['addFriendLogHistory', { type: 'FriendRequest' }],
+            ['addWorldToCache', { id: 'wrld_1' }]
+        ]);
+        expect(suppressionStats.byMethod.get('addFriendLogHistory')).toBe(1);
     });
 
     it('covers intra-object dispatch through `this`', async () => {

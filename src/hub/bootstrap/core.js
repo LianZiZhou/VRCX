@@ -135,7 +135,38 @@ function sleep(ms, signal) {
  * @property {(error: Error) => Promise<void> | void} [onSignInFailure] - called once, on the first failure
  * @property {AbortSignal} [signal] - stops the retries (the Hub is shutting down)
  * @property {{ minMs?: number, maxMs?: number }} [retry]
+ * @property {(controls: { wake: () => void }) => void} [onRetryControls] - receives a `wake()`
+ *   that cuts the current back-off short, for when a client has just signed in
  */
+
+/**
+ * Why `autoLoginAfterMounted()` returned without a user, when it did not throw.
+ *
+ * Upstream treats both of these as "leave the person at the login dialog";
+ * a Hub has no dialog, so it says so in the log and keeps retrying, because
+ * both are fixed from a client without touching the Hub.
+ *
+ * @param {object} stores
+ * @returns {Promise<string>}
+ */
+async function describeSilentSignInFailure(stores) {
+    if (stores.advancedSettings?.enablePrimaryPassword) {
+        return (
+            'the primary password is enabled in the shared settings, which disables automatic sign-in; ' +
+            'turn it off from a client and sign in there'
+        );
+    }
+    let lastUser = null;
+    try {
+        lastUser = await configRepository.getString('lastUserLoggedIn');
+    } catch {
+        // The database may not be readable yet; the generic message covers it.
+    }
+    if (!lastUser) {
+        return 'no stored VRChat session; sign in from a client attached to this Hub';
+    }
+    return 'the stored session could not be resumed; sign in again from a client';
+}
 
 /**
  * Sign in from the stored credentials, and keep trying if VRChat cannot be
@@ -156,7 +187,7 @@ function sleep(ms, signal) {
  * @returns {Promise<void>}
  */
 async function signInWithRetry(stores, options) {
-    const { log = () => {}, onSignInFailure = null, signal = null, retry = {} } = options;
+    const { log = () => {}, onSignInFailure = null, signal = null, retry = {}, onRetryControls = null } = options;
     const minMs = retry.minMs ?? SIGN_IN_RETRY_MIN_MS;
     const maxMs = retry.maxMs ?? SIGN_IN_RETRY_MAX_MS;
 
@@ -167,7 +198,6 @@ async function signInWithRetry(stores, options) {
         attempt += 1;
         try {
             await stores.auth.autoLoginAfterMounted();
-            return true;
         } catch (err) {
             const detail = err instanceof Error ? err.message : String(err);
             log(`Sign-in attempt ${attempt} failed: ${detail.split('\n')[0]}`);
@@ -180,18 +210,35 @@ async function signInWithRetry(stores, options) {
             }
             return false;
         }
+        if (stores.user.currentUser?.id) {
+            return true;
+        }
+        // No throw and no user: upstream's "stay at the login dialog" case.
+        log(`Sign-in attempt ${attempt} did not sign in: ${await describeSilentSignInFailure(stores)}`);
+        return false;
     };
 
     if (await attemptSignIn()) {
         return;
     }
 
+    // A client signing in writes `lastUserLoggedIn`; the Hub is told and
+    // stops waiting out its back-off.
+    let wakeNow = () => {};
+    onRetryControls?.({ wake: () => wakeNow() });
+
     // Deliberately not awaited: the Hub goes on to serve clients and accept
     // an import while VRChat is unreachable.
     (async () => {
         while (!signal?.aborted && !stores.user.currentUser?.id) {
             log(`Retrying sign-in in ${Math.round(delay / 1000)}s`);
-            await sleep(delay, signal);
+            const woken = new AbortController();
+            wakeNow = () => woken.abort();
+            const stop = () => woken.abort();
+            signal?.addEventListener('abort', stop, { once: true });
+            await sleep(delay, woken.signal);
+            signal?.removeEventListener('abort', stop);
+            wakeNow = () => {};
             if (signal?.aborted) {
                 return;
             }
