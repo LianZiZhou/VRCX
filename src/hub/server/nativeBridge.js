@@ -34,7 +34,7 @@
 
 import { createRequire } from 'node:module';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 const require = createRequire(import.meta.url);
 
@@ -95,6 +95,51 @@ function loadAssembly(rootDir) {
 }
 
 /**
+ * Give NLog somewhere to write.
+ *
+ * Upstream configures NLog's file and console targets in `Program.Init()`,
+ * which the Hub does not call (see the file header), so out of the box every
+ * `Logger.Error` on the .NET side -- including `WebApi`'s, which is the only
+ * place the inner exception of a failed HTTP request is ever written --
+ * evaporates. A console target here puts those lines on the Hub's stdout,
+ * where the launcher, systemd and Docker already collect them.
+ *
+ * Done through the same dynamic binding that loads VRCX.dll: NLog.dll ships
+ * beside it, and `LogManager` is a process-wide static, so a configuration
+ * set from here is the one `WebApi`'s logger uses.
+ *
+ * @param {any} dotnet - the node-api-dotnet host
+ * @param {string} assemblyDir - where VRCX.dll and NLog.dll are
+ * @param {(message: string, detail?: any) => void} log
+ * @returns {boolean} whether it worked
+ */
+function configureDotnetLogging(dotnet, assemblyDir, log) {
+    try {
+        dotnet.load(join(assemblyDir, 'NLog.dll'));
+        const NLog = dotnet.NLog;
+        // As XML rather than as objects: NLog's rule and target classes have
+        // overloads and generic methods that the dynamic marshaller cannot
+        // bind, whereas one string goes through untouched.
+        const xml = [
+            '<nlog>',
+            '  <targets>',
+            '    <target name="hub-console" type="Console"',
+            '      layout="[dotnet] ${level:uppercase=true} ${logger:shortName=true}: ${message} ${exception:format=tostring}" />',
+            '  </targets>',
+            '  <rules>',
+            '    <logger name="*" minlevel="Warn" writeTo="hub-console" />',
+            '  </rules>',
+            '</nlog>'
+        ].join(' ');
+        NLog.LogManager.Configuration = NLog.Config.XmlLoggingConfiguration.CreateFromXmlString(xml);
+        return true;
+    } catch (err) {
+        log('Could not route .NET logging to the console', err);
+        return false;
+    }
+}
+
+/**
  * @typedef {object} HubNatives
  * @property {object} SQLite
  * @property {object} WebApi
@@ -106,17 +151,19 @@ function loadAssembly(rootDir) {
 /**
  * Load the .NET side and bring up the pieces the Hub needs.
  *
- * @param {{ rootDir: string, configDir: string, version: string }} options
+ * @param {{ rootDir: string, configDir: string, version: string,
+ *           log?: (message: string, detail?: any) => void }} options
  * @returns {Promise<HubNatives>}
  */
 export async function createNativeBridge(options) {
-    const { rootDir, configDir, version } = options;
+    const { rootDir, configDir, version, log = () => {} } = options;
 
     const bundled = configureDotnetRuntime(rootDir);
-    loadAssembly(rootDir);
+    const assemblyPath = loadAssembly(rootDir);
 
     const dotnet = require('node-api-dotnet/net10.0');
     const VRCX = dotnet.VRCX;
+    configureDotnetLogging(dotnet, dirname(assemblyPath), log);
 
     // Worth logging: a release ships its own runtime, and "which .NET is this
     // actually on" is the first question when a box also has one installed.
