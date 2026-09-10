@@ -98,7 +98,7 @@ describe('reachability diagnostic', () => {
         });
         expect(report.reachable).toBe(true);
         expect(report.detail).toMatch(/Node reached .* but the \.NET side could not/);
-        expect(report.advice.join(' ')).toContain('/data/logs/VRCX.log');
+        expect(report.advice.join(' ')).toContain('system TLS stack');
     });
 
     it('blames the network when Node cannot either', async () => {

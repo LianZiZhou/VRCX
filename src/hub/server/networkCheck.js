@@ -52,16 +52,16 @@ function probeWithHttps(url) {
  * @returns {Promise<ReachabilityReport>}
  */
 export async function diagnoseVrchatReachability(options) {
-    const { configDir, probe = probeWithHttps, url = PROBE_URL } = options;
-    const dotnetLog = `${configDir}/logs/VRCX.log`;
+    const { probe = probeWithHttps, url = PROBE_URL } = options;
     try {
         const response = await probe(url);
         return {
             reachable: true,
             detail: `Node reached ${url} (HTTP ${response.status}) but the .NET side could not.`,
             advice: [
-                `The reason is in the .NET log: ${dotnetLog}`,
-                'Usual causes on Linux: no CA certificates (install ca-certificates), a missing OpenSSL 3 (libssl3),',
+                'The [dotnet] ERROR line above has the exception .NET hit. Node bundles its own OpenSSL and',
+                '.NET uses the system one, so a difference between them points at the system TLS stack:',
+                'CA certificates (ca-certificates), OpenSSL itself (openssl version; curl the same URL),',
                 'or a proxy in http_proxy/https_proxy that .NET honours and Node ignores.'
             ]
         };
@@ -72,7 +72,7 @@ export async function diagnoseVrchatReachability(options) {
             detail: `This machine cannot reach ${url}: ${cause}`,
             advice: [
                 'Check DNS and the route out (ping api.vrchat.cloud, curl -I https://api.vrchat.cloud/api/1/config).',
-                `The .NET side's own error is in ${dotnetLog}.`
+                'The [dotnet] ERROR line above has the exception .NET hit.'
             ]
         };
     }
