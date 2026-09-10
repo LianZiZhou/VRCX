@@ -341,3 +341,36 @@ describe('cross-client GET coalescing', () => {
         expect(upstreamCalls).toBe(2);
     });
 });
+
+describe('hub transport under a burst', () => {
+    it('answers fifty concurrent calls issued in one tick', async () => {
+        const server = createHubServer({
+            port: 0,
+            host: '127.0.0.1',
+            token: TOKEN,
+            handleCall: createInteropHandler(createNatives()),
+            describe: () => ({ databaseVersion: 17, hub: 'test-hub' })
+        });
+        await server.start();
+        const client = createHubConnection({
+            url: `ws://127.0.0.1:${server.address.port}`,
+            token: TOKEN,
+            autoReconnect: false
+        });
+        try {
+            await client.connect();
+            // What a desktop client does on attach: every store fires its
+            // queries at once. Before the receive path was serialised, the
+            // Hub reported all but the first as dropped frames.
+            const results = await Promise.all(
+                Array.from({ length: 50 }, () => client.call('SQLite', 'Execute', ['SELECT 1', null]))
+            );
+            expect(results).toHaveLength(50);
+            expect(results.every((rows) => rows[0][0] === 'row')).toBe(true);
+            expect(client.state).toBe(ConnectionState.READY);
+        } finally {
+            client.close();
+            await server.stop();
+        }
+    });
+});

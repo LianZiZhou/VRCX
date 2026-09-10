@@ -193,3 +193,31 @@ describe('proof of possession', () => {
         await expect(createOpener(server.clientToServer).open(forged)).rejects.toBeInstanceOf(ChannelSecurityError);
     });
 });
+
+describe('bursts', () => {
+    it('opens frames that arrive back to back, before any has finished decrypting', async () => {
+        const { keys } = await keyPair();
+        const sealer = createSealer(keys.clientToServer);
+        const opener = createOpener(keys.clientToServer);
+        const sealedAll = await Promise.all(Array.from({ length: 40 }, (_, n) => sealer.seal({ n })));
+
+        // All opens issued synchronously, as a socket's message events are.
+        const opened = await Promise.all(sealedAll.map((sealed) => opener.open(sealed)));
+        expect(opened.map((frame) => frame.n)).toEqual(Array.from({ length: 40 }, (_, n) => n));
+    });
+
+    it('does not burn a counter on a frame that cannot be serialised', async () => {
+        const { keys } = await keyPair();
+        const sealer = createSealer(keys.clientToServer);
+        const opener = createOpener(keys.clientToServer);
+
+        const first = sealer.seal({ n: 1 });
+        const bad = sealer.seal({ n: 2n }); // BigInt: JSON.stringify throws
+        const third = sealer.seal({ n: 3 });
+        await expect(bad).rejects.toThrow(/BigInt/);
+
+        expect((await opener.open(await first)).n).toBe(1);
+        expect((await opener.open(await third)).n).toBe(3);
+        expect(sealer.counter()).toBe(2n);
+    });
+});
