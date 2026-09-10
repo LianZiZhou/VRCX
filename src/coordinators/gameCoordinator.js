@@ -25,7 +25,7 @@ import configRepository from '../services/config';
 
 // [hub] A mirror client also tells the Hub, which owns the sessions this
 // state opens and closes. See src/hub/client/uplink.js.
-import { uplinkGameState } from '../hub/client/uplink.js';
+import { uplinkGameLogLines, uplinkGameState } from '../hub/client/uplink.js';
 
 import * as workerTimers from 'worker-timers';
 
@@ -226,9 +226,12 @@ function runRestartCrashedGameFlow(location) {
         type: 'Event',
         data: message
     };
-    database.addGamelogEventToDatabase(entry);
-    notificationStore.queueGameLogNoty(entry);
-    gameLogStore.addGameLog(entry);
+    // [hub] As a game log line, so the Hub writes the row and echoes it back.
+    if (!uplinkGameLogLines([JSON.stringify(['', entry.created_at, 'event', message])])) {
+        database.addGamelogEventToDatabase(entry);
+        notificationStore.queueGameLogNoty(entry);
+        gameLogStore.addGameLog(entry);
+    }
     launchStore.launchGame(location, '', gameStore.isGameNoVR);
 }
 

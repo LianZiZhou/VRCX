@@ -17,7 +17,14 @@ import { createServer as createHttpsServer } from 'node:https';
 
 import { WebSocketServer } from 'ws';
 
-import { decodeFrame, encodeFrame, FrameType, PROTOCOL_VERSION, RejectReason } from '../shared/protocol.js';
+import {
+    CLIENT_ID_MIN_LENGTH,
+    decodeFrame,
+    encodeFrame,
+    FrameType,
+    PROTOCOL_VERSION,
+    RejectReason
+} from '../shared/protocol.js';
 import {
     ChannelSecurityError,
     createOpener,
@@ -41,8 +48,9 @@ const Phase = {
  * @property {string} [host]
  * @property {string} token - the pre-shared secret; never sent over the wire
  * @property {{ key: string, cert: string }} [tls] - optional TLS on top of the AEAD
- * @property {(className: string, method: string, args: any[]) => Promise<any>} handleCall
+ * @property {(className: string, method: string, args: any[], client: object) => Promise<any>} handleCall
  * @property {(kind: string, data: any, client: object) => void} [onUplink]
+ * @property {(client: object) => void} [onConnect] - a client completed the handshake and has been welcomed
  * @property {(client: object) => void} [onDisconnect] - an authenticated client's socket closed
  * @property {(op: string, payload: any, client: object) => Promise<any>} [onAdmin] - `admin` frames;
  *   absent means every one of them is answered with an `admin-unsupported` error
@@ -61,6 +69,7 @@ export function createHubServer(options) {
         tls = null,
         handleCall,
         onUplink = () => {},
+        onConnect = () => {},
         onDisconnect = () => {},
         onAdmin = null,
         describe = () => ({}),
@@ -135,6 +144,13 @@ export function createHubServer(options) {
             reject(socket, RejectReason.BAD_HANDSHAKE);
             return;
         }
+        // Stable across reconnects, so the Hub can keep a client's game state
+        // through a link blip instead of ending its session on every close.
+        const clientId = frame.p?.clientId;
+        if (typeof clientId !== 'string' || clientId.length < CLIENT_ID_MIN_LENGTH) {
+            reject(socket, RejectReason.BAD_HANDSHAKE);
+            return;
+        }
 
         const serverNonce = randomNonce();
         const keys = await deriveChannelKeys(token, clientNonce, serverNonce);
@@ -143,6 +159,8 @@ export function createHubServer(options) {
         socket.sealer = createSealer(keys.serverToClient);
         socket.opener = createOpener(keys.clientToServer);
         socket.clientName = String(frame.p?.client ?? 'unknown');
+        socket.clientId = clientId;
+        socket.connectedAt = Date.now();
         socket.phase = Phase.AWAITING_AUTH;
 
         socket.send(encodeFrame({ t: FrameType.CHALLENGE, p: { serverNonce } }));
@@ -171,6 +189,11 @@ export function createHubServer(options) {
             t: FrameType.WELCOME,
             p: { protocol: PROTOCOL_VERSION, ...describe() }
         });
+        try {
+            onConnect(socket);
+        } catch (err) {
+            log('onConnect handler failed', err);
+        }
     }
 
     /**
@@ -187,7 +210,7 @@ export function createHubServer(options) {
             case FrameType.CALL: {
                 const { c, m, a } = frame.p ?? {};
                 try {
-                    const value = await handleCall(c, m, a ?? []);
+                    const value = await handleCall(c, m, a ?? [], socket);
                     await sendSealed(socket, { i: frame.i, t: FrameType.RESULT, p: value });
                 } catch (err) {
                     await sendSealed(socket, {
@@ -338,9 +361,29 @@ export function createHubServer(options) {
             );
         },
 
+        /**
+         * Push an event to one authenticated client.
+         *
+         * @param {object} socket - a client handed to `onConnect`/`onUplink`
+         * @param {string} event - one of `EventType`
+         * @param {any} payload
+         * @returns {Promise<void>}
+         */
+        async sendTo(socket, event, payload) {
+            if (!clients.has(socket)) {
+                return;
+            }
+            await sendSealed(socket, { t: FrameType.EVENT, p: { event, data: payload } });
+        },
+
         /** @returns {number} */
         get clientCount() {
             return clients.size;
+        },
+
+        /** @returns {object[]} the attached clients, for status reporting */
+        get clientList() {
+            return [...clients];
         },
 
         /** @returns {object} the bound address (useful when port is 0) */

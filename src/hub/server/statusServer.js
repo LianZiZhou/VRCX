@@ -26,19 +26,98 @@ function humaniseUptime(seconds) {
 }
 
 /**
+ * @param {unknown} value
+ * @returns {string}
+ */
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;');
+}
+
+/**
+ * @param {number | null | undefined} at - epoch milliseconds
+ * @returns {string}
+ */
+function humaniseAgo(at) {
+    if (!at) {
+        return '—';
+    }
+    const seconds = Math.max(0, Math.floor((Date.now() - at) / 1000));
+    if (seconds < 60) {
+        return `${seconds}s ago`;
+    }
+    return `${humaniseUptime(seconds)} ago`;
+}
+
+/**
+ * @param {{ isGameRunning?: boolean, isSteamVRRunning?: boolean } | null | undefined} state
+ * @returns {string}
+ */
+function describeGameState(state) {
+    if (!state) {
+        return '—';
+    }
+    return state.isGameRunning ? `Running${state.isSteamVRRunning ? ' (VR)' : ''}` : 'Not running';
+}
+
+/**
  * @param {object} status
  * @returns {string}
  */
-function renderPage(status) {
+function renderClients(status) {
+    const clients = status.clients ?? [];
+    const detached = status.detached ?? [];
+    if (!clients.length && !detached.length) {
+        return '<p class="muted">No clients attached.</p>';
+    }
+    const rows = [
+        ...clients.map((client) => {
+            const uplink = client.uplink ?? {};
+            return `<tr>
+      <td>${escapeHtml(client.name)}<br><span class="muted">${escapeHtml(client.remote)}</span></td>
+      <td>${describeGameState(client.gameState)}</td>
+      <td>${escapeHtml(uplink.gamelog ?? 0)} / ${escapeHtml(uplink.backlog ?? 0)} / ${escapeHtml(uplink.ipc ?? 0)}</td>
+      <td>${humaniseAgo(uplink.lastAt)}</td>
+    </tr>`;
+        }),
+        ...detached.map(
+            (entry) => `<tr class="muted">
+      <td>${escapeHtml(entry.clientName)}<br><span class="muted">link dropped; state kept for a moment</span></td>
+      <td>${describeGameState(entry)}</td>
+      <td>—</td>
+      <td>${humaniseAgo(entry.updatedAt)}</td>
+    </tr>`
+        )
+    ];
+    return `<table>
+    <tr><th>Client</th><th>Game</th><th>Log / backlog / Photon</th><th>Last uplink</th></tr>
+    ${rows.join('\n    ')}
+  </table>`;
+}
+
+/**
+ * @param {object} status
+ * @returns {string}
+ */
+export function renderPage(status) {
     const rows = [
         ['Status', status.loggedIn ? 'Logged in' : 'Not logged in'],
-        ['VRChat user', status.displayName ?? '—'],
+        ['VRChat user', escapeHtml(status.displayName ?? '—')],
         ['Pipeline', status.pipelineConnected ? 'Connected' : 'Disconnected'],
+        ['Game', describeGameState(status.gameState)],
+        ['Location', escapeHtml(status.location ?? '—')],
         ['Connected clients', String(status.clientCount)],
         ['Database schema', String(status.databaseVersion)],
         ['Uptime', humaniseUptime(status.uptimeSeconds)],
-        ['Version', status.version]
+        ['Version', escapeHtml(status.version)]
     ];
+    const settings = Object.entries(status.effectiveSettings ?? {}).map(([key, value]) => [
+        escapeHtml(key),
+        escapeHtml(value === null || value === undefined ? '—' : value)
+    ]);
     const healthy = status.loggedIn && status.pipelineConnected;
 
     return `<!doctype html>
@@ -63,6 +142,8 @@ function renderPage(status) {
   td { font-variant-numeric: tabular-nums; }
   footer { margin-top: 1.5rem; opacity: .6; font-size: .85rem; }
   code { background: #8882; padding: .1rem .3rem; border-radius: .2rem; }
+  h2 { font-size: 1rem; margin: 1.5rem 0 .25rem; opacity: .8; }
+  .muted { opacity: .6; font-size: .85rem; }
 </style>
 </head>
 <body>
@@ -71,6 +152,12 @@ function renderPage(status) {
   <div class="state"><span class="dot"></span>${healthy ? 'Collecting' : 'Needs attention'}</div>
   <table>
     ${rows.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join('\n    ')}
+  </table>
+  <h2>Clients</h2>
+  ${renderClients(status)}
+  <h2>Effective settings</h2>
+  <table>
+    ${settings.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join('\n    ')}
   </table>
   <footer>
     Read-only. Sign in from a VRCX client connected to this Hub.

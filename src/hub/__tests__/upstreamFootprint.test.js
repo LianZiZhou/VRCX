@@ -32,20 +32,25 @@ const ALLOWANCE = {
     'vitest.config.js': 6,
     'src/plugins/interopApi.js': 30,
     // The entry points both platforms' game log and game state converge on;
-    // a mirror client sends from here rather than processing locally.
-    'src/coordinators/gameLogCoordinator.js': 12,
-    'src/coordinators/gameCoordinator.js': 12,
+    // a mirror client sends from here rather than processing locally. Plus
+    // the start-up backlog and the crash-restart row, which took the same
+    // route nowhere until they were sent up too.
+    'src/coordinators/gameLogCoordinator.js': 18,
+    'src/coordinators/gameCoordinator.js': 18,
+    // A mirror must not read the Hub's database to learn its own last
+    // location: the Hub is still inserting that row.
+    'src/coordinators/locationCoordinator.js': 12,
     'src/services/database/index.js': 15,
-    // Three lines: a failed request's Error was JSON.stringified into "{}",
-    // which is what every network failure on a headless box would report.
-    'src/services/request.js': 8,
+    // A failed request's Error was JSON.stringified into "{}", and a 401 on
+    // a mirror must not re-authenticate the Hub's session from the mirror.
+    'src/services/request.js': 14,
     'src/services/websocket.js': 25,
     'src/stores/updateLoop.js': 60,
-    'src/stores/vrcx.js': 40
+    'src/stores/vrcx.js': 44
 };
 
 /** Total across every upstream file. */
-const TOTAL_ALLOWANCE = 160;
+const TOTAL_ALLOWANCE = 210;
 
 /**
  * @returns {string | null} a base commit to diff against, or null if we cannot

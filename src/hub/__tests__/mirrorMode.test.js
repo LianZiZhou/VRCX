@@ -18,6 +18,7 @@ import {
     initMirrorMode,
     leaveMirrorMode,
     readHubSettings,
+    relayGate,
     writeHubSettings
 } from '../client/mirrorMode.js';
 import { getHubMode, HubMode, setHubMode } from '../shared/mode.js';
@@ -25,6 +26,14 @@ import { emitPipelineMessage, setPipelineInjector } from '../shared/pipelineRela
 import { EXPECTED_DATABASE_VERSION } from '../shared/schema.js';
 import { guardDatabase } from '../client/databaseGuard.js';
 import { runHub } from '../server/runHub.js';
+import { lastReportedGameState, uplinkQueueDepth, uplinkStats } from '../client/uplink.js';
+
+/**
+ * The Hub's own data core runs in this process too and watches the real
+ * `watchState`, so "friends loaded" is faked through the seam rather than
+ * by flipping the flag the Hub would react to.
+ */
+let friendsLoaded = false;
 
 /**
  * A stand-in for the local VRCXStorage binding (VRCX.json).
@@ -74,6 +83,7 @@ describe('mirror mode', () => {
         token = hub.config.token;
         savedGlobals.SQLite = globalThis.SQLite;
         savedGlobals.WebApi = globalThis.WebApi;
+        relayGate.isFriendsLoaded = () => friendsLoaded;
     }, 60000);
 
     afterEach(() => {
@@ -81,6 +91,8 @@ describe('mirror mode', () => {
         setHubMode(HubMode.HUB);
         globalThis.SQLite = savedGlobals.SQLite;
         globalThis.WebApi = savedGlobals.WebApi;
+        friendsLoaded = false;
+        delete globalThis.$pinia;
     });
 
     afterAll(async () => {
@@ -196,7 +208,7 @@ describe('mirror mode', () => {
             });
         });
 
-        it('feeds relayed pipeline messages into the local handler', async () => {
+        it('feeds relayed pipeline messages into the local handler once friends are loaded', async () => {
             const seen = [];
             setPipelineInjector((args) => seen.push(args));
 
@@ -204,15 +216,114 @@ describe('mirror mode', () => {
                 type: 'friend-online',
                 content: JSON.stringify({ userId: 'usr_relay' })
             });
+            // Upstream opens its socket only after the friends list is
+            // loaded; until then the REST snapshot at login is the truth and
+            // a relayed event would only move it backwards.
+            const droppedBefore = hubClientState.stats.pipelineDroppedBeforeFriends;
             emitPipelineMessage(message);
+            await vi.waitFor(() => expect(hubClientState.stats.pipelineDroppedBeforeFriends).toBe(droppedBefore + 1));
+            expect(seen).toHaveLength(0);
 
+            friendsLoaded = true;
+            emitPipelineMessage(message);
             await vi.waitFor(() => expect(seen).toHaveLength(1));
             // Parsed exactly as a direct socket would have, including the
             // second parse of `content`.
             expect(seen[0].json.type).toBe('friend-online');
             expect(seen[0].json.content).toEqual({ userId: 'usr_relay' });
+            expect(hubClientState.stats.pipelineByType['friend-online']).toBeGreaterThanOrEqual(1);
             setPipelineInjector(null);
         });
+
+        it("holds the Hub's echoes until the stores exist, then replays them in order", async () => {
+            const lines = [];
+            const ipc = [];
+            await hub.server.broadcast('gamelog', ['["a"]']);
+            await hub.server.broadcast('ipc', '{"type":"OnEvent"}');
+            await hub.server.broadcast('gamelog', ['["b"]']);
+            await vi.waitFor(() => expect(hubClientState.stats.bootBuffered).toBeGreaterThanOrEqual(3));
+
+            globalThis.$pinia = {
+                gameLog: { addGameLogEvent: (line) => lines.push(line) },
+                vrcx: { ipcEvent: (json) => ipc.push(json) },
+                game: { isGameRunning: false, isSteamVRRunning: false }
+            };
+            await vi.waitFor(() => expect(lines).toEqual(['["a"]', '["b"]']));
+            expect(ipc).toEqual(['{"type":"OnEvent"}']);
+
+            // Once the stores exist, echoes go straight through.
+            await hub.server.broadcast('gamelog', ['["c"]']);
+            await vi.waitFor(() => expect(lines).toEqual(['["a"]', '["b"]', '["c"]']));
+        });
+
+        it("records the Hub's game state without applying it to this machine", async () => {
+            let applied = 0;
+            globalThis.$pinia = {
+                gameLog: { addGameLogEvent() {} },
+                vrcx: { ipcEvent() {} },
+                game: {
+                    isGameRunning: false,
+                    isSteamVRRunning: false,
+                    updateIsGameRunning: () => applied++
+                }
+            };
+            await hub.server.broadcast('game-state', { isGameRunning: true, isSteamVRRunning: true });
+            await vi.waitFor(() =>
+                expect(hubClientState.hubGameState).toEqual({ isGameRunning: true, isSteamVRRunning: true })
+            );
+            expect(applied).toBe(0);
+            expect(globalThis.$pinia.game.isGameRunning).toBe(false);
+        });
+
+        it("shows the Hub's pipeline as its own", async () => {
+            const { wsState } = await import('../../services/websocket.js');
+            await vi.waitFor(() => expect(hubClientState.hub).not.toBeNull());
+            await hub.server.broadcast('hub-state', { pipelineConnected: true, clientCount: 1, gameState: null });
+            await vi.waitFor(() => expect(hubClientState.pipelineConnected).toBe(true));
+            await vi.waitFor(() => expect(wsState.connected).toBe(true));
+            await hub.server.broadcast('hub-state', { pipelineConnected: false, clientCount: 1, gameState: null });
+            await vi.waitFor(() => expect(wsState.connected).toBe(false));
+        });
+
+        it('re-announces game state and resyncs after the link comes back', async () => {
+            const refreshed = [];
+            globalThis.$pinia = {
+                gameLog: { addGameLogEvent() {} },
+                vrcx: { ipcEvent() {} },
+                game: { isGameRunning: true, isSteamVRRunning: false },
+                notification: { refreshNotifications: () => refreshed.push('notifications') },
+                friend: { isRefreshFriendsLoading: false, refreshFriends: () => refreshed.push('friends') }
+            };
+            friendsLoaded = true;
+
+            const reported = [];
+            const original = hub.registry.report;
+            hub.registry.report = (...args) => {
+                reported.push(args[1]);
+                return original.apply(hub.registry, args);
+            };
+            try {
+                const connection = getHubConnection();
+                const reconnectsBefore = hubClientState.reconnects;
+                // Drop the socket from the Hub's side; the client reconnects on its own.
+                for (const socket of hub.server.clientList) {
+                    socket.terminate();
+                }
+                await vi.waitFor(() => expect(hubClientState.reconnects).toBe(reconnectsBefore + 1), {
+                    timeout: 10000
+                });
+                expect(connection.state).toBe('ready');
+                await vi.waitFor(() =>
+                    expect(reported.at(-1)).toEqual({ isGameRunning: true, isSteamVRRunning: false })
+                );
+                expect(refreshed).toEqual(['notifications', 'friends']);
+                expect(lastReportedGameState()).toEqual({ isGameRunning: true, isSteamVRRunning: false });
+                expect(uplinkQueueDepth()).toEqual({ lines: 0, ipc: 0, backlog: 0 });
+                expect(uplinkStats.flushes).toBeGreaterThanOrEqual(2);
+            } finally {
+                hub.registry.report = original;
+            }
+        }, 15000);
 
         it('suppresses derived writes but lets user writes through', async () => {
             const written = [];
