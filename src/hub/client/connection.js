@@ -18,6 +18,7 @@
  */
 
 import { decodeFrame, encodeFrame, FrameType, PROTOCOL_VERSION } from '../shared/protocol.js';
+import { recordLinkFrame } from './socketInspector.js';
 import {
     buildAuthProof,
     ChannelSecurityError,
@@ -163,7 +164,9 @@ export function createHubConnection(options) {
         if (!socket || !sealer) {
             throw new Error('Hub channel is not established');
         }
-        socket.send(await sealer.seal(frame));
+        const bytes = await sealer.seal(frame);
+        socket.send(bytes);
+        recordLinkFrame('out', frame, bytes.byteLength);
     }
 
     /**
@@ -179,6 +182,7 @@ export function createHubConnection(options) {
         } catch {
             return;
         }
+        recordLinkFrame('in', frame, typeof data === 'string' ? data.length : 0);
 
         if (frame.t === FrameType.REJECT) {
             const error = new HubRejectedError(frame.p?.reason ?? 'unknown');
@@ -215,6 +219,7 @@ export function createHubConnection(options) {
             throw new ChannelSecurityError('Sealed frame before the channel was established');
         }
         const frame = await opener.open(data);
+        recordLinkFrame('in', frame, data?.byteLength ?? data?.length ?? 0);
 
         switch (frame.t) {
             case FrameType.WELCOME:
@@ -298,12 +303,13 @@ export function createHubConnection(options) {
         }, HANDSHAKE_TIMEOUT_MS);
 
         socket.onopen = () => {
-            socket.send(
-                encodeFrame({
-                    t: FrameType.HELLO,
-                    p: { protocol: PROTOCOL_VERSION, client: clientName, clientNonce, clientId: CLIENT_ID }
-                })
-            );
+            const hello = {
+                t: FrameType.HELLO,
+                p: { protocol: PROTOCOL_VERSION, client: clientName, clientNonce, clientId: CLIENT_ID }
+            };
+            const encoded = encodeFrame(hello);
+            socket.send(encoded);
+            recordLinkFrame('out', hello, encoded.length);
         };
 
         socket.onmessage = (message) => {

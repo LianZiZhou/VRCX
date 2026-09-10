@@ -313,10 +313,15 @@ prefixes.
 DevTools (Windows). It opens a window that shows the main window's socket
 traffic live -- the VRChat pipeline as this client received it, the Hub
 link's events, and this machine's uplinks -- with filters by channel, type
-and text, pause, and a pretty-printed detail pane. The main window records
-the last 500 messages regardless (`client/socketInspector.js`, tapped in
-`shared/pipelineRelay.js`), so the window opens with history; the tap into
-the window is only on while it is open. The page is `src/socket-inspect.html`
+and text, pause, and a pretty-printed detail pane. A second view, "All
+frames", shows what the wire actually carries: every frame of the Hub link
+decoded -- the handshake, each `call` (every SQLite query and HTTP request a
+mirror makes) with its `result` and the round-trip time, events, uplinks,
+ping/pong -- which is what DevTools' network tab shows as opaque binary.
+Session cookies are masked. The main window records the last 500 messages and
+1000 frames regardless (`client/socketInspector.js`, tapped in
+`shared/pipelineRelay.js` and `client/connection.js`), so the window opens
+with history; the tap into the window is only on while it is open. The page is `src/socket-inspect.html`
 and the window `Dotnet/Cef/SocketInspectForm.cs`; the Electron build has no
 tray entry for it yet.
 
