@@ -330,9 +330,27 @@ forty idempotent `CREATE … IF NOT EXISTS` statements; a mirror may be the
 first to sign in a user the Hub has never seen). VRChat registry backups are
 per machine but keep their bookkeeping in the shared `configs` table, so with
 more than one mirror only one of them will back up. The primary password
-setting and upstream's three-auto-logins-per-hour rule both apply to the Hub's
-own sign-in; the Hub says so in its log and keeps retrying, and a client
-signing in wakes it.
+setting and a two-factor prompt both block the Hub's own sign-in; the Hub says
+so in its log and keeps retrying, and a client signing in wakes it.
+
+**Staying signed in.** Upstream's answer to a dead session is the login
+dialog: a 401 triggers an automatic re-login, and after three of those in an
+hour it logs out and waits for a click. A Hub has nobody to click, so
+`bootstrap/core.js` keeps the session itself. At start-up the first sign-in is
+awaited and further attempts back off from 30 s to 5 min. If the Hub is signed
+out later -- VRChat invalidated the cookie, upstream's guard gave up -- the same
+loop signs back in from the saved credentials, since upstream's logout flow
+drops `lastUserLoggedIn` and the cookies but keeps the saved login; the
+back-off stands in for the three-per-hour rule. A Hub that signs itself out
+writes `VRCX_hubResumeUser` to the shared `configs` table and clears it once
+back in, so a restart in between still knows whom to resume, while a person
+signing out from a client (which never sets it) stays signed out. The VRChat
+pipeline socket is watched too: `services/websocket.js` now retries a failed
+token fetch (upstream gave up after one, and a network blip that outlasted its
+five-second close-retry left the pipeline down until the hourly friends refresh
+or a click on it), and the Hub's watchdog calls `reconnectWebSocket()` when the
+socket has been down for 90 s while signed in, for the cases that retry cannot
+see: a socket that never opens, or a token response that was not `ok`.
 
 **Data written offline diverges.** A client running standalone writes to its own
 local database, and nothing merges that back on its own. To fold it in, copy the
@@ -500,18 +518,19 @@ the shim does not cover.
 Everything else is new files. The upstream tree is touched in eleven places,
 each a small guarded block marked `// [hub]`:
 
-| File                                      | What                                                                                       |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `src/plugins/interopApi.js`               | attempt the Hub, rebind `SQLite`/`WebApi`                                                  |
-| `src/coordinators/gameLogCoordinator.js`  | mirror: send lines and the start-up backlog up                                             |
-| `src/coordinators/gameCoordinator.js`     | mirror: tell the Hub the game state; crash row goes up                                     |
-| `src/coordinators/locationCoordinator.js` | mirror: last location from memory, not the Hub's DB                                        |
-| `src/services/database/index.js`          | wrap the export in the suppression proxy                                                   |
-| `src/services/request.js`                 | report an Error's message, not `{}`; 401 is the Hub's                                      |
-| `src/services/websocket.js`               | relay pipeline messages; mirrors do not connect                                            |
-| `src/stores/updateLoop.js`                | gate timers by mode: no Discord on the Hub, no status change or cache eviction on a mirror |
-| `src/stores/vrcx.js`                      | Hub owns the schema; uplink Photon events before login too                                 |
-| `vitest.config.js`                        | exclude the Hub suite (it has its own config)                                              |
-| `package.json`                            | three scripts, four dev dependencies                                                       |
+| File                                       | What                                                                                       |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `src/plugins/interopApi.js`                | attempt the Hub, rebind `SQLite`/`WebApi`                                                  |
+| `src/coordinators/gameLogCoordinator.js`   | mirror: send lines and the start-up backlog up                                             |
+| `src/coordinators/gameCoordinator.js`      | mirror: tell the Hub the game state; crash row goes up                                     |
+| `src/coordinators/locationCoordinator.js`  | mirror: last location from memory, not the Hub's DB                                        |
+| `src/coordinators/userEventCoordinator.js` | keep the GPS for the first stop after coming online while traveling                        |
+| `src/services/database/index.js`           | wrap the export in the suppression proxy                                                   |
+| `src/services/request.js`                  | report an Error's message, not `{}`; 401 is the Hub's                                      |
+| `src/services/websocket.js`                | relay pipeline messages; mirrors do not connect; retry a failed token fetch                |
+| `src/stores/updateLoop.js`                 | gate timers by mode: no Discord on the Hub, no status change or cache eviction on a mirror |
+| `src/stores/vrcx.js`                       | Hub owns the schema; uplink Photon events before login too                                 |
+| `vitest.config.js`                         | exclude the Hub suite (it has its own config)                                              |
+| `package.json`                             | three scripts, four dev dependencies                                                       |
 
 `git log -S'[hub]'` finds all of them. `Dotnet/` is untouched.
