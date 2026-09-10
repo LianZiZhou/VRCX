@@ -31,6 +31,10 @@ const ALLOWANCE = {
     'package.json': 12,
     'vitest.config.js': 6,
     'src/plugins/interopApi.js': 30,
+    // The entry points both platforms' game log and game state converge on;
+    // a mirror client sends from here rather than processing locally.
+    'src/coordinators/gameLogCoordinator.js': 12,
+    'src/coordinators/gameCoordinator.js': 12,
     'src/services/database/index.js': 15,
     // Three lines: a failed request's Error was JSON.stringified into "{}",
     // which is what every network failure on a headless box would report.

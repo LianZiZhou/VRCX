@@ -238,7 +238,11 @@ deletions, settings) still go through to the Hub's database as normal.
 game-running state can only be collected on the machine actually running
 VRChat. Clients uplink them; the Hub processes each once and echoes the result
 to everyone, including the sender. That way there is one writer and one code
-path.
+path. The uplink hooks sit in the coordinators, because on Windows the C#
+side calls `$pinia.gameLog.addGameLogEvent` directly rather than going through
+the update loop. The Hub applies the game state itself, so the session the
+activity views are built on opens and closes there, and clears it when the
+client that reported it disconnects.
 
 **Schema is Hub-owned.** Migrations and `VACUUM` run only on the Hub. C# holds a
 single SQLite connection behind one lock, so several clients migrating the same
@@ -420,18 +424,20 @@ the shim does not cover.
 
 ### Upstream footprint
 
-Everything else is new files. The upstream tree is touched in eight places, each
+Everything else is new files. The upstream tree is touched in ten places, each
 a small guarded block marked `// [hub]`:
 
-| File                             | What                                               |
-| -------------------------------- | -------------------------------------------------- |
-| `src/plugins/interopApi.js`      | attempt the Hub, rebind `SQLite`/`WebApi`          |
-| `src/services/database/index.js` | wrap the export in the suppression proxy           |
-| `src/services/request.js`        | report an Error's message, not `{}` (upstreamable) |
-| `src/services/websocket.js`      | relay pipeline messages; mirrors do not connect    |
-| `src/stores/updateLoop.js`       | gate timers by mode; uplink instead of processing  |
-| `src/stores/vrcx.js`             | Hub owns the schema; uplink Photon events          |
-| `vitest.config.js`               | exclude the Hub suite (it has its own config)      |
-| `package.json`                   | three scripts, four dev dependencies               |
+| File                                     | What                                               |
+| ---------------------------------------- | -------------------------------------------------- |
+| `src/plugins/interopApi.js`              | attempt the Hub, rebind `SQLite`/`WebApi`          |
+| `src/coordinators/gameLogCoordinator.js` | mirror: send the line up instead of processing it  |
+| `src/coordinators/gameCoordinator.js`    | mirror: tell the Hub the game state                |
+| `src/services/database/index.js`         | wrap the export in the suppression proxy           |
+| `src/services/request.js`                | report an Error's message, not `{}` (upstreamable) |
+| `src/services/websocket.js`              | relay pipeline messages; mirrors do not connect    |
+| `src/stores/updateLoop.js`               | gate timers by mode; uplink instead of processing  |
+| `src/stores/vrcx.js`                     | Hub owns the schema; uplink Photon events          |
+| `vitest.config.js`                       | exclude the Hub suite (it has its own config)      |
+| `package.json`                           | three scripts, four dev dependencies               |
 
 `git log -S'[hub]'` finds all of them. `Dotnet/` is untouched.

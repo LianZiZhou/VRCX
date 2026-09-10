@@ -43,6 +43,7 @@ const Phase = {
  * @property {{ key: string, cert: string }} [tls] - optional TLS on top of the AEAD
  * @property {(className: string, method: string, args: any[]) => Promise<any>} handleCall
  * @property {(kind: string, data: any, client: object) => void} [onUplink]
+ * @property {(client: object) => void} [onDisconnect] - an authenticated client's socket closed
  * @property {(op: string, payload: any, client: object) => Promise<any>} [onAdmin] - `admin` frames;
  *   absent means every one of them is answered with an `admin-unsupported` error
  * @property {() => object} [describe] - extra fields for the `welcome` frame
@@ -60,6 +61,7 @@ export function createHubServer(options) {
         tls = null,
         handleCall,
         onUplink = () => {},
+        onDisconnect = () => {},
         onAdmin = null,
         describe = () => ({}),
         log = () => {}
@@ -268,8 +270,15 @@ export function createHubServer(options) {
             }
         });
 
-        socket.on('close', () => clients.delete(socket));
-        socket.on('error', () => clients.delete(socket));
+        // `delete` is true only for a client that completed the handshake,
+        // and only once, so the callback fires once per attached client.
+        const gone = () => {
+            if (clients.delete(socket)) {
+                onDisconnect(socket);
+            }
+        };
+        socket.on('close', gone);
+        socket.on('error', gone);
     });
 
     return {

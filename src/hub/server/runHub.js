@@ -214,9 +214,34 @@ export async function runHub(options = {}) {
             userId: stores.user.currentUser?.id ?? null,
             displayName: stores.user.currentUser?.displayName ?? null
         }),
-        onUplink: (kind, data) => handleUplink(kind, data),
+        onUplink: (kind, data, client) => handleUplink(kind, data, client),
+        onDisconnect: (client) => {
+            if (client === gameStateReporter) {
+                log(`Client running the game left (${client.clientName}); game state cleared`);
+                gameStateReporter = null;
+                applyGameState({ isGameRunning: false, isSteamVRRunning: false });
+            }
+        },
         onAdmin: handleAdmin
     });
+
+    /** The client that last said the game is running; its departure ends the session. */
+    let gameStateReporter = null;
+
+    /**
+     * The Hub runs the same game-state flow a desktop does: it is what opens
+     * and closes the session the activity views are built on, and what gates
+     * the game log handlers (`location` writes a visit only while the game is
+     * running). Then everyone is told, sender included.
+     *
+     * @param {{ isGameRunning: boolean, isSteamVRRunning: boolean }} state
+     */
+    function applyGameState(state) {
+        Promise.resolve(stores.game.updateIsGameRunning(state.isGameRunning, state.isSteamVRRunning)).catch((err) =>
+            log('Failed to apply game state', err)
+        );
+        server.broadcast(EventType.GAME_STATE, state);
+    }
 
     /**
      * Local-machine data from a client. The Hub processes it exactly once,
@@ -226,8 +251,9 @@ export async function runHub(options = {}) {
      *
      * @param {string} kind
      * @param {any} data
+     * @param {object} client - the socket it came from
      */
-    function handleUplink(kind, data) {
+    function handleUplink(kind, data, client) {
         try {
             switch (kind) {
                 case UplinkKind.GAME_LOG:
@@ -242,9 +268,15 @@ export async function runHub(options = {}) {
                     server.broadcast(EventType.IPC, data);
                     break;
 
-                case UplinkKind.GAME_STATE:
-                    server.broadcast(EventType.GAME_STATE, data);
+                case UplinkKind.GAME_STATE: {
+                    const state = {
+                        isGameRunning: Boolean(data?.isGameRunning),
+                        isSteamVRRunning: Boolean(data?.isSteamVRRunning)
+                    };
+                    gameStateReporter = state.isGameRunning ? client : null;
+                    applyGameState(state);
                     break;
+                }
 
                 default:
                     log(`Ignoring unknown uplink kind: ${kind}`);

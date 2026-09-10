@@ -139,7 +139,7 @@ describe('hub end to end', () => {
         expect(received[0]).toEqual([line]);
     });
 
-    it('echoes uplinked game state', async () => {
+    it('applies uplinked game state, echoes it, and clears it when that client leaves', async () => {
         const received = [];
         await connectClient({
             onEvent: (event, data) => {
@@ -154,6 +154,14 @@ describe('hub end to end', () => {
 
         await vi.waitFor(() => expect(received).toHaveLength(1));
         expect(received[0]).toEqual({ isGameRunning: true, isSteamVRRunning: false });
+        // The Hub runs the flow itself: it owns the session and gates the
+        // game log handlers on this.
+        await vi.waitFor(() => expect(hub.stores.game.isGameRunning).toBe(true));
+
+        sender.close();
+        await vi.waitFor(() => expect(received).toHaveLength(2));
+        expect(received[1]).toEqual({ isGameRunning: false, isSteamVRRunning: false });
+        await vi.waitFor(() => expect(hub.stores.game.isGameRunning).toBe(false));
     });
 
     it('rejects a client with the wrong token', async () => {
