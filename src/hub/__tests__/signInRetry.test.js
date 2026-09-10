@@ -94,7 +94,7 @@ describe('reachability diagnostic', () => {
     it('blames the .NET side when Node can reach VRChat', async () => {
         const report = await diagnoseVrchatReachability({
             configDir: '/data',
-            fetchImpl: async () => ({ status: 200 })
+            probe: async () => ({ status: 200 })
         });
         expect(report.reachable).toBe(true);
         expect(report.detail).toMatch(/Node reached .* but the \.NET side could not/);
@@ -104,11 +104,20 @@ describe('reachability diagnostic', () => {
     it('blames the network when Node cannot either', async () => {
         const report = await diagnoseVrchatReachability({
             configDir: '/data',
-            fetchImpl: async () => {
-                throw Object.assign(new Error('fetch failed'), { cause: new Error('getaddrinfo ENOTFOUND') });
+            probe: async () => {
+                throw Object.assign(new Error('getaddrinfo ENOTFOUND api.vrchat.cloud'), { code: 'ENOTFOUND' });
             }
         });
         expect(report.reachable).toBe(false);
-        expect(report.detail).toContain('getaddrinfo ENOTFOUND');
+        expect(report.detail).toContain('ENOTFOUND: getaddrinfo ENOTFOUND');
+    });
+});
+
+describe('reachability probe', () => {
+    it('uses the Node HTTP stack, not the DOM shim fetch', async () => {
+        // happy-dom's fetch is on the global in this environment and would
+        // refuse the cross-origin request; the real probe must not use it.
+        const report = await diagnoseVrchatReachability({ configDir: '/data' });
+        expect(report.detail).not.toMatch(/Cross-Origin/);
     });
 });
