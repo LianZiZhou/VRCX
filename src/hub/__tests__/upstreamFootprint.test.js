@@ -40,6 +40,10 @@ const ALLOWANCE = {
     // A mirror must not read the Hub's database to learn its own last
     // location: the Hub is still inserting that row.
     'src/coordinators/locationCoordinator.js': 12,
+    // A friend who comes online while traveling gets an Online entry that
+    // says "traveling" and, since upstream 654872fc (2024-11), no GPS for
+    // the arrival either; the first stop after login was lost.
+    'src/coordinators/userEventCoordinator.js': 6,
     'src/services/database/index.js': 15,
     // A failed request's Error was JSON.stringified into "{}", and a 401 on
     // a mirror must not re-authenticate the Hub's session from the mirror.
