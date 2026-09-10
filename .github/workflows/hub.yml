@@ -40,9 +40,15 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # The upstream-footprint test diffs against origin/master, so it needs
-          # real history rather than a shallow clone.
+          # The upstream-footprint test diffs against upstream/master, so it
+          # needs real history rather than a shallow clone.
           fetch-depth: 0
+      # The footprint guard falls back to origin/master, which on a fork lags
+      # behind the commit the branch was last rebased onto and would count
+      # upstream's own changes as ours.
+      - run: |
+          git remote add upstream https://github.com/vrcx-team/VRCX.git
+          git fetch --no-tags upstream master
       - uses: actions/setup-node@v6
         with:
           node-version: lts/*
