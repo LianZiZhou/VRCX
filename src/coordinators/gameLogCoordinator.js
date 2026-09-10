@@ -23,6 +23,10 @@ import { userRequest } from '../api';
 import { watchState } from '../services/watchState';
 import { toast } from 'vue-sonner';
 
+// [hub] A mirror client sends game log lines to the Hub instead of
+// processing them; the Hub's echo re-enters below. See src/hub/client/uplink.js.
+import { uplinkGameLogLine } from '../hub/client/uplink.js';
+
 import { useAdvancedSettingsStore } from '../stores/settings/advanced';
 import { useFriendStore } from '../stores/friend';
 import { useGalleryStore } from '../stores/gallery';
@@ -501,6 +505,9 @@ export function addGameLogEntry(gameLog, location) {
  * @param {string} json
  */
 export function addGameLogEvent(json) {
+    if (uplinkGameLogLine(json)) {
+        return; // [hub]
+    }
     const locationStore = useLocationStore();
 
     const rawLogs = JSON.parse(json);

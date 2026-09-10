@@ -22,11 +22,10 @@ import { useVrStore } from './vr';
 import { useVrcxStore } from './vrcx';
 import { watchState } from '../services/watchState';
 
-// [hub] Timer ownership differs by run mode: the Hub drives the data-owning
-// refreshes, a mirror client uplinks its local-machine data instead of
-// processing it. See src/hub/shared/mode.js.
-import { isHubMode, isMirrorMode } from '../hub/shared/mode.js';
-import { uplinkGameLogLines, uplinkGameState } from '../hub/client/uplink.js';
+// [hub] The Hub drives the data-owning refreshes and has no local game to
+// poll; a mirror client's uplink happens in the coordinators. See
+// src/hub/shared/mode.js and src/hub/client/uplink.js.
+import { isHubMode } from '../hub/shared/mode.js';
 
 import * as workerTimers from 'worker-timers';
 
@@ -138,28 +137,20 @@ export const useUpdateLoopStore = defineStore('UpdateLoop', () => {
                     // arrives from clients over the uplink.
                     state.nextGetLogCheck = 0.5;
                     const logLines = await LogWatcher.GetLogLines();
-                    if (logLines?.length) {
-                        if (isMirrorMode()) {
-                            // [hub] Send up and let the Hub write once, then
-                            // broadcast back; processing here too would double.
-                            uplinkGameLogLines(logLines);
-                        } else {
-                            logLines.forEach((logLine) => {
-                                addGameLogEvent(logLine);
-                            });
-                        }
+                    if (logLines) {
+                        logLines.forEach((logLine) => {
+                            addGameLogEvent(logLine);
+                        });
                     }
                 }
                 if (LINUX && !isHubMode() && --state.nextGameRunningCheck <= 0) {
                     // [hub] Skipped on the Hub: there is no local game, and
                     // vrInit() would push a shared feed every single second.
                     state.nextGameRunningCheck = 1;
-                    const isGameRunning = await AppApi.IsGameRunning();
-                    const isSteamVRRunning = await AppApi.IsSteamVRRunning();
-                    await runUpdateIsGameRunningFlow(isGameRunning, isSteamVRRunning);
-                    if (isMirrorMode()) {
-                        uplinkGameState({ isGameRunning, isSteamVRRunning });
-                    }
+                    await runUpdateIsGameRunningFlow(
+                        await AppApi.IsGameRunning(),
+                        await AppApi.IsSteamVRRunning()
+                    );
                     vrStore.vrInit(); // TODO: make this event based
                 }
                 if (--state.nextDatabaseOptimize <= 0) {

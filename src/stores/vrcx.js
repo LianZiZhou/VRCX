@@ -457,11 +457,10 @@ export const useVrcxStore = defineStore('Vrcx', () => {
         if (!watchState.isLoggedIn) {
             return;
         }
-        // [hub] Send Photon events up and let the Hub write them once, then
-        // broadcast back to every client. Processing here as well would
-        // duplicate the moderation rows this derives.
-        if (isMirrorMode()) {
-            uplinkIpcEvent(json);
+        // [hub] A mirror client sends Photon events to the Hub, which writes
+        // them once and broadcasts back; the echo is not taken and is
+        // processed here as usual.
+        if (uplinkIpcEvent(json)) {
             return;
         }
         let data;
