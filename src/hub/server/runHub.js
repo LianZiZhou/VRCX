@@ -6,10 +6,15 @@
  * module dynamically rather than statically.
  */
 
+import { watch } from 'vue';
+
 import { createHubServer } from './wsServer.js';
 import { createAdminHandler } from './adminHandler.js';
+import { createConfigSync } from './configSync.js';
+import { createGameStateRegistry } from './gameStateRegistry.js';
 import { createInteropHandler } from './interopHandler.js';
 import { createNativeBridge, shutdownNativeBridge } from './nativeBridge.js';
+import { createSqliteGate } from './sqliteGate.js';
 import { createStatusServer } from './statusServer.js';
 import { logWebApiFailures } from './webApiLog.js';
 import { diagnoseVrchatReachability } from './networkCheck.js';
@@ -18,13 +23,18 @@ import { HubMode, setHubMode } from '../shared/mode.js';
 import { HUB_USAGE, loadHubConfig, RESTART_EXIT_CODE } from './config.js';
 import { applyPendingImport } from './pendingImport.js';
 import { EXPECTED_DATABASE_VERSION } from '../shared/schema.js';
+import { isEchoedIpc } from '../shared/ipcRouting.js';
 import { resolveDatabasePath } from '../migrate/dataDir.js';
 import { installNativeStubs } from '../bootstrap/nativeStubs.js';
 import { setPipelineObserver } from '../shared/pipelineRelay.js';
 import { startHubCore, startHubRuntime } from '../bootstrap/core.js';
 import { UplinkKind } from '../client/uplink.js';
 import { withRequestCoalescing } from './requestCoalescer.js';
+import { addGameLogEntry, tryLoadPlayerList } from '../../coordinators/gameLogCoordinator';
+import { AppDebug } from '../../services/appConfig';
 import { wsState } from '../../services/websocket.js';
+
+import configRepository from '../../services/config';
 
 // `VERSION` is injected as a build-time define (see vite.hub.config.js).
 const HUB_VERSION = typeof VERSION === 'undefined' ? 'VRCX-Hub' : VERSION;
@@ -49,6 +59,23 @@ function bindNatives(natives) {
         globalThis.window.SQLite = natives.SQLite;
         globalThis.window.WebApi = natives.WebApi;
         globalThis.window.VRCXStorage = natives.VRCXStorage;
+    }
+}
+
+/**
+ * Replays a client's start-up backlog the way `gameLogCoordinator.js#updateGameLog`
+ * does: the location each entry belongs to is tracked from the backlog's own
+ * `location` entries, regardless of the game state at the time.
+ *
+ * @param {object[]} entries - parsed entries, as `gameLogService.getAll()` returns them
+ */
+function replayGameLogBacklog(entries) {
+    let location = '';
+    for (const gameLog of entries) {
+        if (gameLog?.type === 'location') {
+            location = gameLog.location;
+        }
+        addGameLogEntry(gameLog, location);
     }
 }
 
@@ -144,7 +171,16 @@ export async function runHub(options = {}) {
         // The one place the .NET side's HTTP failure reason can still be read
         // before upstream code reduces it to `{}`.
         natives.WebApi = logWebApiFailures(natives.WebApi, { log });
-        bindNatives(natives);
+    }
+
+    // One connection, many writers: the Hub's own statements and every
+    // client's go through the transaction gate, each as its own owner, so a
+    // `BEGIN ... COMMIT` from one cannot interleave with another's.
+    const sqliteGate = createSqliteGate(natives.SQLite, { log });
+    const nativeSQLite = natives.SQLite;
+    natives = { ...natives, SQLite: sqliteGate.forOwner('hub') };
+    bindNatives(natives);
+    if (!config.dryRun) {
         const where = natives.runtime.bundled ? 'bundled' : 'system';
         log(`.NET bridge ready (SQLite, WebApi, VRCXStorage) on ${natives.runtime.description} [${where}]`);
     }
@@ -155,9 +191,38 @@ export async function runHub(options = {}) {
     log(`Data core up: ${Object.keys(stores).length} stores`);
 
     // --- transport --------------------------------------------------------
-    const handleCall = withRequestCoalescing(createInteropHandler({ SQLite: natives.SQLite, WebApi: natives.WebApi }), {
-        ttlMs: 0
+    /** @type {Map<string, object>} clientId -> that client's view of SQLite */
+    const clientSqliteViews = new Map();
+    const sqliteForClient = (client) => {
+        const owner = client?.clientId ?? 'anonymous';
+        let view = clientSqliteViews.get(owner);
+        if (!view) {
+            view = sqliteGate.forOwner(owner);
+            clientSqliteViews.set(owner, view);
+        }
+        return view;
+    };
+
+    let signInWake = () => {};
+    const configSync = createConfigSync({
+        stores,
+        configRepository,
+        log,
+        verbose: config.verbose,
+        onSignInHint: () => signInWake()
     });
+
+    const interop = createInteropHandler({ SQLite: nativeSQLite, WebApi: natives.WebApi }, { sqliteForClient });
+    const coalesced = withRequestCoalescing(interop, { ttlMs: 0 });
+    const handleCall = async (className, method, args, client) => {
+        if (config.verbose) {
+            log(`call ${className}.${method} from ${client?.clientName ?? '?'}`);
+        }
+        if (className === 'SQLite' && method === 'ExecuteNonQuery') {
+            configSync.observe(args?.[0], args?.[1] ?? null);
+        }
+        return coalesced(className, method, args, client);
+    };
 
     /**
      * Ask the supervisor for a fresh process. `stop` is defined further down;
@@ -193,18 +258,112 @@ export async function runHub(options = {}) {
         log
     });
 
+    // --- game state -------------------------------------------------------
+    // Per client, keyed by the stable clientId; the Hub's own game state is
+    // the OR over them. See server/gameStateRegistry.js for why.
+    const registry = createGameStateRegistry();
+
+    /** What every client and the status page get told about the Hub. */
+    function hubState() {
+        return {
+            pipelineConnected: wsState.connected,
+            clientCount: server.clientCount,
+            gameState: registry.aggregate(),
+            clients: registry.snapshot()
+        };
+    }
+
+    function broadcastHubState() {
+        server.broadcast(EventType.HUB_STATE, hubState()).catch(() => {});
+    }
+
+    registry.onChange((state) => {
+        log(`Game state: ${state.isGameRunning ? 'running' : 'stopped'} (SteamVR ${state.isSteamVRRunning})`);
+        applyAggregateGameState(state).catch((err) => log('Failed to apply game state', err));
+    });
+
+    /**
+     * The Hub runs the same game-state flow a desktop does: it is what opens
+     * and closes the session the activity views are built on, and what gates
+     * the game log handlers (`location` writes a visit only while the game is
+     * running). Then everyone is told what the Hub now believes.
+     *
+     * @param {{ isGameRunning: boolean, isSteamVRRunning: boolean }} state
+     */
+    async function applyAggregateGameState(state) {
+        await stores.game.updateIsGameRunning(state.isGameRunning, state.isSteamVRRunning);
+        if (state.isGameRunning && stores.game.isGameRunning && !stores.location.lastLocation.location) {
+            // A Hub restarted mid-session has no idea where the player is.
+            // Upstream's own hot-reload recovery rebuilds it from the rows
+            // already in the database.
+            try {
+                await tryLoadPlayerList();
+            } catch (err) {
+                log('Could not restore the player list from the game log', err);
+            }
+        }
+        await server.broadcast(EventType.GAME_STATE, state);
+        broadcastHubState();
+    }
+
+    // --- session mirroring ------------------------------------------------
+    // Clients keep a local copy of the Hub's VRChat cookies so that when the
+    // Hub goes away they can fall back to standalone without a fresh login and
+    // a 2FA prompt. Sent to each client as it attaches, and broadcast on
+    // change: the cookie jar only moves on login, logout and token refresh.
+    let lastSessionFingerprint = null;
+
+    /** @returns {Promise<{ fingerprint: string, session: object }>} */
+    async function currentSession() {
+        const cookies = await natives.WebApi.GetCookies();
+        const userId = stores.user.currentUser?.id ?? null;
+        return {
+            fingerprint: `${userId}:${cookies?.length ?? 0}:${cookies ?? ''}`,
+            session: {
+                loggedIn: Boolean(userId),
+                userId,
+                displayName: stores.user.currentUser?.displayName ?? null,
+                cookies
+            }
+        };
+    }
+
+    async function broadcastSessionIfChanged() {
+        if (!server.clientCount) {
+            return;
+        }
+        try {
+            const { fingerprint, session } = await currentSession();
+            if (fingerprint === lastSessionFingerprint) {
+                return;
+            }
+            lastSessionFingerprint = fingerprint;
+            await server.broadcast(EventType.SESSION, session);
+        } catch (err) {
+            log('Failed to broadcast session state', err);
+        }
+    }
+
+    /**
+     * @param {object} client
+     */
+    async function sendSessionTo(client) {
+        try {
+            const { fingerprint, session } = await currentSession();
+            lastSessionFingerprint = fingerprint;
+            await server.sendTo(client, EventType.SESSION, session);
+        } catch (err) {
+            log('Failed to send session state to a client', err);
+        }
+    }
+
     const server = createHubServer({
         port: config.port,
         host: config.host,
         token: config.token,
         tls: config.tls,
         log,
-        handleCall: config.verbose
-            ? async (c, m, a) => {
-                  log(`call ${c}.${m}`);
-                  return handleCall(c, m, a);
-              }
-            : handleCall,
+        handleCall,
         describe: () => ({
             hub: HUB_VERSION,
             // Advertises the `admin` frame; the migration tool checks for it.
@@ -212,36 +371,28 @@ export async function runHub(options = {}) {
             databaseVersion: stores.vrcx.state.databaseVersion ?? 0,
             loggedIn: Boolean(stores.user.currentUser?.id),
             userId: stores.user.currentUser?.id ?? null,
-            displayName: stores.user.currentUser?.displayName ?? null
+            displayName: stores.user.currentUser?.displayName ?? null,
+            // Which HTTP goes through the Hub: `client/remoteInterop.js`.
+            endpointDomain: AppDebug.endpointDomain,
+            gameState: registry.aggregate(),
+            pipelineConnected: wsState.connected
         }),
+        onConnect: (client) => {
+            registry.attach(client.clientId, client.clientName);
+            client.uplinkStats = { gamelog: 0, backlog: 0, ipc: 0, gameState: 0, lastAt: 0 };
+            if (stores.user.currentUser?.id) {
+                sendSessionTo(client);
+            }
+            broadcastHubState();
+        },
         onUplink: (kind, data, client) => handleUplink(kind, data, client),
         onDisconnect: (client) => {
-            if (client === gameStateReporter) {
-                log(`Client running the game left (${client.clientName}); game state cleared`);
-                gameStateReporter = null;
-                applyGameState({ isGameRunning: false, isSteamVRRunning: false });
-            }
+            registry.detach(client.clientId);
+            clientSqliteViews.delete(client.clientId);
+            broadcastHubState();
         },
         onAdmin: handleAdmin
     });
-
-    /** The client that last said the game is running; its departure ends the session. */
-    let gameStateReporter = null;
-
-    /**
-     * The Hub runs the same game-state flow a desktop does: it is what opens
-     * and closes the session the activity views are built on, and what gates
-     * the game log handlers (`location` writes a visit only while the game is
-     * running). Then everyone is told, sender included.
-     *
-     * @param {{ isGameRunning: boolean, isSteamVRRunning: boolean }} state
-     */
-    function applyGameState(state) {
-        Promise.resolve(stores.game.updateIsGameRunning(state.isGameRunning, state.isSteamVRRunning)).catch((err) =>
-            log('Failed to apply game state', err)
-        );
-        server.broadcast(EventType.GAME_STATE, state);
-    }
 
     /**
      * Local-machine data from a client. The Hub processes it exactly once,
@@ -254,29 +405,48 @@ export async function runHub(options = {}) {
      * @param {object} client - the socket it came from
      */
     function handleUplink(kind, data, client) {
+        const stats = client.uplinkStats;
+        if (stats) {
+            stats.lastAt = Date.now();
+        }
         try {
             switch (kind) {
                 case UplinkKind.GAME_LOG:
+                    if (stats) {
+                        stats.gamelog += data?.length ?? 0;
+                    }
                     for (const line of data ?? []) {
                         stores.gameLog.addGameLogEvent(line);
                     }
                     server.broadcast(EventType.GAMELOG, data);
                     break;
 
-                case UplinkKind.IPC:
-                    stores.vrcx.ipcEvent(data);
-                    server.broadcast(EventType.IPC, data);
+                case UplinkKind.GAME_LOG_BACKLOG:
+                    if (stats) {
+                        stats.backlog += data?.length ?? 0;
+                    }
+                    replayGameLogBacklog(Array.isArray(data) ? data : []);
+                    server.broadcast(EventType.GAMELOG_BACKLOG, data);
                     break;
 
-                case UplinkKind.GAME_STATE: {
-                    const state = {
-                        isGameRunning: Boolean(data?.isGameRunning),
-                        isSteamVRRunning: Boolean(data?.isSteamVRRunning)
-                    };
-                    gameStateReporter = state.isGameRunning ? client : null;
-                    applyGameState(state);
+                case UplinkKind.IPC:
+                    if (stats) {
+                        stats.ipc += 1;
+                    }
+                    stores.vrcx.ipcEvent(data);
+                    // `Ping`, `MsgPing` and `Event7List` are processed on the
+                    // sender as well as here; echoing them would double that.
+                    if (isEchoedIpc(data)) {
+                        server.broadcast(EventType.IPC, data);
+                    }
                     break;
-                }
+
+                case UplinkKind.GAME_STATE:
+                    if (stats) {
+                        stats.gameState += 1;
+                    }
+                    registry.report(client.clientId, data, client.clientName);
+                    break;
 
                 default:
                     log(`Ignoring unknown uplink kind: ${kind}`);
@@ -291,34 +461,15 @@ export async function runHub(options = {}) {
         server.broadcast(EventType.PIPELINE, raw);
     });
 
-    // --- session mirroring ------------------------------------------------
-    // Clients keep a local copy of the Hub's VRChat cookies so that when the
-    // Hub goes away they can fall back to standalone without a fresh login and
-    // a 2FA prompt. Broadcast on change rather than on a timer: the cookie jar
-    // only moves on login, logout and token refresh.
-    let lastSessionFingerprint = null;
-    async function broadcastSessionIfChanged() {
-        if (!server.clientCount) {
-            return;
+    // The status bar on a mirror shows the *Hub's* pipeline, since the mirror
+    // has none of its own.
+    const stopPipelineWatch = watch(
+        () => wsState.connected,
+        (connected) => {
+            log(`VRChat pipeline ${connected ? 'connected' : 'disconnected'}`);
+            broadcastHubState();
         }
-        try {
-            const cookies = await natives.WebApi.GetCookies();
-            const userId = stores.user.currentUser?.id ?? null;
-            const fingerprint = `${userId}:${cookies?.length ?? 0}:${cookies ?? ''}`;
-            if (fingerprint === lastSessionFingerprint) {
-                return;
-            }
-            lastSessionFingerprint = fingerprint;
-            await server.broadcast(EventType.SESSION, {
-                loggedIn: Boolean(userId),
-                userId,
-                displayName: stores.user.currentUser?.displayName ?? null,
-                cookies
-            });
-        } catch (err) {
-            log('Failed to broadcast session state', err);
-        }
-    }
+    );
 
     const sessionTimer = setInterval(() => {
         broadcastSessionIfChanged().catch(() => {});
@@ -340,7 +491,29 @@ export async function runHub(options = {}) {
             pipelineConnected: wsState.connected,
             clientCount: server.clientCount,
             databaseVersion: stores.vrcx.state.databaseVersion ?? 0,
-            uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000)
+            uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
+            gameState: registry.aggregate(),
+            location: stores.location.lastLocation.location || null,
+            clients: server.clientList.map((client) => ({
+                clientId: client.clientId,
+                name: client.clientName,
+                remote: client.remoteLabel,
+                connectedAt: client.connectedAt ?? null,
+                gameState: registry.snapshot().find((entry) => entry.clientId === client.clientId) ?? null,
+                uplink: client.uplinkStats ?? null
+            })),
+            detached: registry.snapshot().filter((entry) => !entry.attached),
+            effectiveSettings: {
+                gameLogDisabled: stores.advancedSettings?.gameLogDisabled ?? null,
+                autoStateChangeEnabled: stores.generalSettings?.autoStateChangeEnabled ?? null,
+                relaunchVRChatAfterCrash: stores.advancedSettings?.relaunchVRChatAfterCrash ?? null,
+                logEmptyAvatars: stores.generalSettings?.logEmptyAvatars ?? null
+            },
+            stats: {
+                requests: coalesced.stats,
+                transactions: sqliteGate.stats,
+                settings: configSync.stats
+            }
         })
     });
     await status.start();
@@ -356,6 +529,9 @@ export async function runHub(options = {}) {
         const databaseReady = await startHubRuntime(stores, {
             log,
             signal: shutdown.signal,
+            onRetryControls: (controls) => {
+                signInWake = controls.wake;
+            },
             // A sign-in that fails with no HTTP status never left the .NET
             // side. Say whether the box can reach VRChat at all, since on a
             // headless machine that is the whole question.
@@ -387,12 +563,14 @@ export async function runHub(options = {}) {
         log('Shutting down');
         shutdown.abort();
         clearInterval(sessionTimer);
+        stopPipelineWatch();
         setPipelineObserver(null);
+        registry.dispose();
         await server.stop();
         await status.stop();
         app.unmount();
         if (!config.dryRun) {
-            shutdownNativeBridge(natives);
+            shutdownNativeBridge({ ...natives, SQLite: nativeSQLite });
         }
     }
 
@@ -407,5 +585,5 @@ export async function runHub(options = {}) {
         });
     }
 
-    return { stop, server, status, stores, config, requestRestart };
+    return { stop, server, status, stores, config, requestRestart, registry, sqliteGate, configSync };
 }

@@ -10,11 +10,25 @@
  * Bumped whenever a frame shape or the interop contract changes. The Hub and
  * the client must agree exactly — a half-compatible pair fails in ways that are
  * very hard to diagnose, so `hello`/`welcome` rejects a mismatch outright.
+ *
+ * History:
+ *   1  initial
+ *   2  `hello` carries a stable `clientId`; `game-state` is the Hub's
+ *      aggregate rather than one client's report; `gamelog-backlog` and
+ *      `hub-state` events; `welcome` carries the Hub's game state, pipeline
+ *      health and API endpoint.
  */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
+
+/**
+ * The shortest `clientId` a `hello` may carry. It is a random hex string
+ * generated once per client process (`client/connection.js`), so the Hub can
+ * tell a reconnect from a second machine.
+ */
+export const CLIENT_ID_MIN_LENGTH = 16;
 
 export const FrameType = {
-    /** client -> hub: versions + client nonce. Cleartext, carries no secret. */
+    /** client -> hub: versions, client nonce, clientId. Cleartext, carries no secret. */
     HELLO: 'hello',
     /** hub -> client: server nonce. Cleartext; both sides now derive keys. */
     CHALLENGE: 'challenge',
@@ -43,15 +57,29 @@ export const FrameType = {
 export const EventType = {
     /** raw VRChat pipeline message, fed to handlePipeline() on each client */
     PIPELINE: 'pipeline',
-    /** a processed gamelog entry, already persisted by the Hub */
+    /** raw game log lines the Hub has processed and persisted, echoed to every client */
     GAMELOG: 'gamelog',
+    /**
+     * Parsed game log entries from a client's start-up backlog (the part of
+     * the log VRChat wrote while VRCX was closed), processed by the Hub and
+     * echoed like `gamelog`.
+     */
+    GAMELOG_BACKLOG: 'gamelog-backlog',
     /** Photon/IPC event originating from whichever client is running VRChat */
     IPC: 'ipc',
-    /** isGameRunning / isHmdAfk / current location */
+    /**
+     * The Hub's *aggregate* game state: `{ isGameRunning, isSteamVRRunning }`
+     * OR-ed over every attached client. Informational on a client -- its own
+     * game state is a fact about its own machine and is never overwritten.
+     */
     GAME_STATE: 'game-state',
     /** login state changes, and the cookie blob clients mirror for offline use */
     SESSION: 'session',
-    /** connection count, pipeline health, uptime */
+    /**
+     * `{ pipelineConnected, clientCount, gameState, clients: [{ clientId,
+     * name, gameState }] }`. Sent on every change of the pipeline socket or
+     * the client set.
+     */
     HUB_STATE: 'hub-state'
 };
 
