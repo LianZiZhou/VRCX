@@ -22,7 +22,7 @@
  *    VRChat install, which a Hub box does not have.
  */
 
-import { createApp, defineComponent } from 'vue';
+import { createApp, defineComponent, watch } from 'vue';
 
 import { createGlobalStores, pinia } from '../../stores';
 import { i18n, loadLocalizedStrings } from '../../plugins/i18n';
@@ -32,6 +32,8 @@ import { initDayjs } from '../../plugins/dayjs';
 import { router } from '../shims/router.js';
 
 import configRepository from '../../services/config';
+import { watchState } from '../../services/watchState';
+import { reconnectWebSocket, wsState } from '../../services/websocket.js';
 import vrcxJsonStorage from '../../services/jsonStorage';
 
 /**
@@ -110,6 +112,20 @@ export function mountHubCore() {
 /** Sign-in retry backoff: first wait, and the cap it doubles up to. */
 const SIGN_IN_RETRY_MIN_MS = 30000;
 const SIGN_IN_RETRY_MAX_MS = 5 * 60 * 1000;
+/** How long a sign-in that came back without a user gets for upstream's detached re-login to show up. */
+const SIGN_IN_SETTLE_MS = 3000;
+
+/**
+ * Written when the Hub signs itself out, cleared when it is back in. A Hub
+ * restarted in between finds `lastUserLoggedIn` gone (upstream's logout flow
+ * removes it) and would otherwise wait for a client; this says whom to resume.
+ * A person signing out from a client never sets it, so that stays a sign-out.
+ */
+const RESUME_USER_KEY = 'VRCX_hubResumeUser';
+
+/** How often the pipeline watchdog looks, and how long a gap it lets pass. */
+const PIPELINE_WATCHDOG_MS = 30000;
+const PIPELINE_DOWN_GRACE_MS = 90000;
 
 /**
  * @param {number} ms
@@ -133,18 +149,59 @@ function sleep(ms, signal) {
  * @typedef {object} RuntimeOptions
  * @property {(message: string) => void} [log]
  * @property {(error: Error) => Promise<void> | void} [onSignInFailure] - called once, on the first failure
- * @property {AbortSignal} [signal] - stops the retries (the Hub is shutting down)
- * @property {{ minMs?: number, maxMs?: number }} [retry]
+ * @property {AbortSignal} [signal] - stops the retries and the watchdog (the Hub is shutting down)
+ * @property {{ minMs?: number, maxMs?: number, settleMs?: number }} [retry]
  * @property {(controls: { wake: () => void }) => void} [onRetryControls] - receives a `wake()`
  *   that cuts the current back-off short, for when a client has just signed in
+ * @property {{ intervalMs?: number, graceMs?: number, reconnect?: () => void }} [watchdog]
  */
 
+/** @returns {boolean} */
+function isSignedIn() {
+    return watchState.isLoggedIn === true;
+}
+
 /**
- * Why `autoLoginAfterMounted()` returned without a user, when it did not throw.
+ * Upstream's own re-login runs detached: a 401 inside `getCurrentUser` calls
+ * `handleAutoLogin()` without awaiting it, so the sign-in call returns while
+ * that is still getting started -- `attemptingAutoLogin` is not even set yet.
+ * Give it `settleMs` to appear and, once it has, up to a minute to finish,
+ * before judging the attempt; otherwise the log says the session could not be
+ * resumed just before "Hello there".
  *
- * Upstream treats both of these as "leave the person at the login dialog";
+ * @param {object} stores
+ * @param {number} settleMs
+ * @param {AbortSignal | null} signal
+ * @returns {Promise<void>}
+ */
+async function awaitUpstreamAutoLogin(stores, settleMs, signal) {
+    const settled = Date.now() + settleMs;
+    const deadline = Date.now() + 60000;
+    while (!isSignedIn() && !signal?.aborted) {
+        const now = Date.now();
+        const busy = Boolean(stores.auth?.attemptingAutoLogin);
+        if (busy ? now >= deadline : now >= settled) {
+            return;
+        }
+        await sleep(Math.min(250, settleMs || 250), signal);
+    }
+}
+
+/**
+ * @param {unknown} err
+ * @returns {string}
+ */
+function firstLine(err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return detail.split('\n')[0];
+}
+
+/**
+ * Why a sign-in attempt returned without a user, when it did not throw.
+ *
+ * Upstream treats all of these as "leave the person at the login dialog";
  * a Hub has no dialog, so it says so in the log and keeps retrying, because
- * both are fixed from a client without touching the Hub.
+ * every one of them is fixed from a client without touching the Hub.
  *
  * @param {object} stores
  * @returns {Promise<string>}
@@ -155,6 +212,9 @@ async function describeSilentSignInFailure(stores) {
             'the primary password is enabled in the shared settings, which disables automatic sign-in; ' +
             'turn it off from a client and sign in there'
         );
+    }
+    if (stores.auth?.twoFactorAuthDialogVisible) {
+        return 'VRChat asked for a two-factor code, which a Hub cannot answer; sign in from a client attached to this Hub';
     }
     let lastUser = null;
     try {
@@ -169,38 +229,53 @@ async function describeSilentSignInFailure(stores) {
 }
 
 /**
- * Sign in from the stored credentials, and keep trying if VRChat cannot be
- * reached.
+ * Keep the Hub signed in to VRChat.
  *
  * On the desktop a failed start-up sign-in leaves the user at the login
- * dialog to click again. A Hub has nobody to click, and the usual cause on a
- * freshly set-up box is a network that is not there yet: DNS still coming
- * up, a proxy, a missing CA store. So the first attempt is awaited -- a Hub
- * that can sign in should be signed in before it starts serving clients --
- * and further attempts run in the background with a doubling delay.
+ * dialog to click again, and a session that dies later (VRChat invalidated
+ * the cookie, or the auto-login guard gave up after three tries in an hour)
+ * drops them back to that dialog. A Hub has nobody to click. So:
+ *
+ *  - the first attempt is awaited -- a Hub that can sign in should be signed
+ *    in before it starts serving clients -- and further attempts run in the
+ *    background with a doubling delay;
+ *  - once it has been signed in, a later sign-out starts the same loop again,
+ *    this time from the saved credentials, since upstream's logout flow drops
+ *    `lastUserLoggedIn` and the cookies but keeps the saved login.
+ *
+ * The back-off is what stands in for upstream's three-per-hour guard: the
+ * attempts are spaced out instead of counted.
  *
  * `getCurrentUser` failures are not seen here: `autoLoginAfterMounted`
  * already catches them and hands them to the update loop's own retry.
  *
  * @param {object} stores
  * @param {RuntimeOptions} options
- * @returns {Promise<void>}
+ * @returns {{ signIn: () => Promise<void> }}
  */
-async function signInWithRetry(stores, options) {
+function createSessionKeeper(stores, options) {
     const { log = () => {}, onSignInFailure = null, signal = null, retry = {}, onRetryControls = null } = options;
     const minMs = retry.minMs ?? SIGN_IN_RETRY_MIN_MS;
     const maxMs = retry.maxMs ?? SIGN_IN_RETRY_MAX_MS;
+    const settleMs = retry.settleMs ?? SIGN_IN_SETTLE_MS;
 
     let attempt = 0;
-    let delay = minMs;
-    /** @returns {Promise<boolean>} */
-    const attemptSignIn = async () => {
+    let running = false;
+    /** The user the Hub was last signed in as; who to sign back in as. */
+    let lastUserId = null;
+
+    // A client signing in writes `lastUserLoggedIn`; the Hub is told and
+    // stops waiting out its back-off.
+    let wakeNow = () => {};
+    onRetryControls?.({ wake: () => wakeNow() });
+
+    /** Start-up: resume the stored session the way the desktop does. */
+    const bootAttempt = async () => {
         attempt += 1;
         try {
             await stores.auth.autoLoginAfterMounted();
         } catch (err) {
-            const detail = err instanceof Error ? err.message : String(err);
-            log(`Sign-in attempt ${attempt} failed: ${detail.split('\n')[0]}`);
+            log(`Sign-in attempt ${attempt} failed: ${firstLine(err)}`);
             if (attempt === 1) {
                 try {
                     await onSignInFailure?.(err);
@@ -210,7 +285,8 @@ async function signInWithRetry(stores, options) {
             }
             return false;
         }
-        if (stores.user.currentUser?.id) {
+        await awaitUpstreamAutoLogin(stores, settleMs, signal);
+        if (isSignedIn()) {
             return true;
         }
         // No throw and no user: upstream's "stay at the login dialog" case.
@@ -218,37 +294,171 @@ async function signInWithRetry(stores, options) {
         return false;
     };
 
-    if (await attemptSignIn()) {
-        return;
+    /** After a sign-out: log in again from the saved credentials. */
+    const resumeAttempt = async () => {
+        attempt += 1;
+        const userId = lastUserId;
+        let user;
+        try {
+            user = await stores.auth.getSavedCredentials(userId);
+        } catch (err) {
+            log(`Sign-in attempt ${attempt} failed: ${firstLine(err)}`);
+            return false;
+        }
+        if (!user) {
+            log(
+                `Sign-in attempt ${attempt} did not sign in: no saved credentials for ${userId}; ` +
+                    'sign in again from a client attached to this Hub'
+            );
+            return false;
+        }
+        try {
+            await stores.auth.relogin(user, { shouldTrackLoginNetworkIssueHint: false });
+        } catch (err) {
+            log(`Sign-in attempt ${attempt} failed: ${firstLine(err)}`);
+            return false;
+        }
+        await awaitUpstreamAutoLogin(stores, settleMs, signal);
+        if (isSignedIn()) {
+            return true;
+        }
+        log(`Sign-in attempt ${attempt} did not sign in: ${await describeSilentSignInFailure(stores)}`);
+        return false;
+    };
+
+    /** @returns {Promise<boolean>} */
+    const attemptSignIn = () => (lastUserId ? resumeAttempt() : bootAttempt());
+
+    /** A previous Hub process signed itself out and was restarted before it got back in. */
+    async function adoptResumeMarker() {
+        try {
+            const marker = await configRepository.getString(RESUME_USER_KEY);
+            if (!marker) {
+                return;
+            }
+            if ((await configRepository.getString('lastUserLoggedIn')) !== null) {
+                // A client has signed in since; the stored session is the one to resume.
+                return;
+            }
+            lastUserId = marker;
+            log(`The previous Hub process was signed out of VRChat; resuming ${marker} from the saved credentials`);
+        } catch {
+            // Not readable yet; the usual path applies.
+        }
     }
 
-    // A client signing in writes `lastUserLoggedIn`; the Hub is told and
-    // stops waiting out its back-off.
-    let wakeNow = () => {};
-    onRetryControls?.({ wake: () => wakeNow() });
-
-    // Deliberately not awaited: the Hub goes on to serve clients and accept
-    // an import while VRChat is unreachable.
-    (async () => {
-        while (!signal?.aborted && !stores.user.currentUser?.id) {
-            log(`Retrying sign-in in ${Math.round(delay / 1000)}s`);
-            const woken = new AbortController();
-            wakeNow = () => woken.abort();
-            const stop = () => woken.abort();
-            signal?.addEventListener('abort', stop, { once: true });
-            await sleep(delay, woken.signal);
-            signal?.removeEventListener('abort', stop);
-            wakeNow = () => {};
-            if (signal?.aborted) {
-                return;
-            }
-            if (await attemptSignIn()) {
-                log('Signed in.');
-                return;
-            }
-            delay = Math.min(delay * 2, maxMs);
+    /**
+     * The back-off loop. Only one runs at a time; it ends when the Hub is
+     * signed in, by whichever path, or shutting down.
+     */
+    async function retryUntilSignedIn() {
+        if (running) {
+            return;
         }
-    })().catch((err) => log(`Sign-in retry loop stopped: ${err?.message ?? err}`));
+        running = true;
+        let delay = minMs;
+        try {
+            while (!signal?.aborted && !isSignedIn()) {
+                log(`Retrying sign-in in ${Math.round(delay / 1000)}s`);
+                const woken = new AbortController();
+                wakeNow = () => woken.abort();
+                const stop = () => woken.abort();
+                signal?.addEventListener('abort', stop, { once: true });
+                await sleep(delay, woken.signal);
+                signal?.removeEventListener('abort', stop);
+                wakeNow = () => {};
+                if (signal?.aborted || isSignedIn()) {
+                    // Shut down, or something else signed the Hub in meanwhile.
+                    return;
+                }
+                if (await attemptSignIn()) {
+                    log('Signed in.');
+                    return;
+                }
+                delay = Math.min(delay * 2, maxMs);
+            }
+        } catch (err) {
+            log(`Sign-in retry loop stopped: ${firstLine(err)}`);
+        } finally {
+            running = false;
+        }
+    }
+
+    const stopWatching = watch(
+        () => watchState.isLoggedIn,
+        (loggedIn) => {
+            if (loggedIn) {
+                lastUserId = stores.user.currentUser?.id ?? lastUserId;
+                configRepository.remove(RESUME_USER_KEY).catch(() => {});
+                return;
+            }
+            if (signal?.aborted || running) {
+                return;
+            }
+            log('Signed out of VRChat; signing back in from the saved credentials');
+            if (lastUserId) {
+                configRepository.setString(RESUME_USER_KEY, lastUserId).catch(() => {});
+            }
+            // Deliberately not awaited, and never immediate: upstream's logout
+            // flow is still clearing cookies when this fires.
+            void retryUntilSignedIn();
+        },
+        { flush: 'sync' }
+    );
+    signal?.addEventListener('abort', stopWatching, { once: true });
+
+    return {
+        async signIn() {
+            await adoptResumeMarker();
+            if (await attemptSignIn()) {
+                return;
+            }
+            // Deliberately not awaited: the Hub goes on to serve clients and
+            // accept an import while VRChat is unreachable.
+            void retryUntilSignedIn();
+        }
+    };
+}
+
+/**
+ * Reconnect the VRChat pipeline when it has been down for a while.
+ *
+ * `services/websocket.js` retries on its own after a close and after a
+ * failed token fetch. This covers what that cannot see: a socket that never
+ * opens, or a token response that was not an error but not `ok` either.
+ * `reconnectWebSocket()` tears down whatever is there and starts over, and
+ * declines on its own when the Hub is not signed in.
+ *
+ * @param {RuntimeOptions} options
+ * @returns {void}
+ */
+function startPipelineWatchdog(options) {
+    const { log = () => {}, signal = null, watchdog = {} } = options;
+    const intervalMs = watchdog.intervalMs ?? PIPELINE_WATCHDOG_MS;
+    const graceMs = watchdog.graceMs ?? PIPELINE_DOWN_GRACE_MS;
+    const reconnect = watchdog.reconnect ?? reconnectWebSocket;
+
+    let downSince = null;
+    const timer = setInterval(() => {
+        if (!watchState.isLoggedIn || !watchState.isFriendsLoaded || wsState.connected) {
+            downSince = null;
+            return;
+        }
+        const now = Date.now();
+        downSince ??= now;
+        if (now - downSince < graceMs) {
+            return;
+        }
+        log(`VRChat pipeline has been down for ${Math.round((now - downSince) / 1000)}s; reconnecting`);
+        downSince = now;
+        try {
+            reconnect();
+        } catch (err) {
+            log(`Pipeline reconnect failed: ${firstLine(err)}`);
+        }
+    }, intervalMs);
+    timer.unref?.();
+    signal?.addEventListener('abort', () => clearInterval(timer), { once: true });
 }
 
 /**
@@ -274,10 +484,12 @@ export async function startHubRuntime(stores, options = {}) {
         return false;
     }
     await stores.auth.migrateStoredUsers();
-    // Signs in from the stored credentials. The pipeline socket follows on its
-    // own: stores/auth.js watches `watchState.isFriendsLoaded` and calls
-    // initWebsocket() when it flips.
-    await signInWithRetry(stores, options);
+    // Signs in from the stored credentials, and signs back in after a later
+    // sign-out. The pipeline socket follows on its own: stores/auth.js
+    // watches `watchState.isFriendsLoaded` and calls initWebsocket() when it
+    // flips; the watchdog is for when that socket stays down.
+    await createSessionKeeper(stores, options).signIn();
+    startPipelineWatchdog(options);
     return true;
 }
 
