@@ -29,7 +29,7 @@ import { EventType } from '../shared/protocol.js';
 import { handleHubConnectionState } from './fallback.js';
 import { HubMode, setHubMode } from '../shared/mode.js';
 import { injectPipelineMessage } from '../shared/pipelineRelay.js';
-import { setUplinkSender } from './uplink.js';
+import { replayFromHub, setUplinkSender } from './uplink.js';
 
 /** How long to wait for a Hub before falling back to standalone. */
 const CONNECT_TIMEOUT_MS = 3000;
@@ -227,20 +227,26 @@ function handleHubEvent(event, data, localWebApi) {
             injectPipelineMessage(data);
             break;
 
+        // The next three re-enter the same entry points the local sources
+        // use, inside replayFromHub() so the uplink guards there let them
+        // through instead of sending them up again. Rows are already
+        // written on the Hub; derived writes are suppressed here.
         case EventType.GAMELOG:
-            // Re-processed locally so this client's in-memory stores update.
-            // The rows are already written; derived writes are suppressed here.
-            for (const line of data ?? []) {
-                globalThis.$pinia?.gameLog?.addGameLogEvent?.(line);
-            }
+            replayFromHub(() => {
+                for (const line of data ?? []) {
+                    globalThis.$pinia?.gameLog?.addGameLogEvent?.(line);
+                }
+            });
             break;
 
         case EventType.IPC:
-            globalThis.$pinia?.vrcx?.ipcEvent?.(data);
+            replayFromHub(() => globalThis.$pinia?.vrcx?.ipcEvent?.(data));
             break;
 
         case EventType.GAME_STATE:
-            globalThis.$pinia?.game?.updateIsGameRunning?.(data?.isGameRunning, data?.isSteamVRRunning);
+            replayFromHub(() =>
+                globalThis.$pinia?.game?.updateIsGameRunning?.(data?.isGameRunning, data?.isSteamVRRunning)
+            );
             break;
 
         case EventType.SESSION:
