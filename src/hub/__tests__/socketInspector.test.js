@@ -8,6 +8,9 @@ import {
     INSPECTOR_MAX_RAW,
     inspectorStats,
     isSocketInspectorEnabled,
+    LINK_FRAME_BUFFER,
+    linkFrameSnapshot,
+    recordLinkFrame,
     recordSocketMessage,
     resetSocketInspector,
     setSocketInspectorEnabled,
@@ -101,6 +104,82 @@ describe('socket inspector', () => {
         setSocketInspectorEnabled(true);
         expect(() => recordSocketMessage(SocketChannel.VRCHAT, 'in', '{"type":"a"}')).not.toThrow();
         expect(inspectorStats.pushFailures).toBe(2);
+    });
+
+    it('records link frames apart from messages, with latency and a summary', () => {
+        recordLinkFrame(
+            'out',
+            { i: 7, t: 'call', p: { c: 'SQLite', m: 'ExecuteJson', a: ['SELECT * FROM t WHERE x = @x', {}] } },
+            120
+        );
+        const result = recordLinkFrame('in', { i: 7, t: 'result', p: [[1], [2], [3]] }, 80);
+        expect(result).toMatchObject({
+            channel: 'link',
+            direction: 'in',
+            type: 'result',
+            frameId: 7,
+            summary: '3 rows',
+            wireBytes: 80
+        });
+        expect(result.latencyMs).toBeGreaterThanOrEqual(0);
+
+        const http = recordLinkFrame('out', {
+            i: 8,
+            t: 'call',
+            p: { c: 'WebApi', m: 'Execute', a: [{ url: 'https://api.vrchat.cloud/api/1/auth/user', method: 'GET' }] }
+        });
+        expect(http.summary).toBe('WebApi.Execute GET https://api.vrchat.cloud/api/1/auth/user');
+        expect(
+            recordLinkFrame('in', { i: 8, t: 'result', p: { status: 200, message: '{"id":"usr_1"}' } }).summary
+        ).toBe('HTTP 200 {"id":"usr_1"}');
+        expect(recordLinkFrame('in', { t: 'event', p: { event: 'game-state', data: {} } }).summary).toBe('game-state');
+        expect(recordLinkFrame('out', { t: 'uplink', p: { kind: 'gamelog-raw', data: ['a', 'b'] } }).summary).toBe(
+            'gamelog-raw ×2'
+        );
+        expect(
+            recordLinkFrame('in', { i: 9, t: 'error', p: { code: 'not-allowed', message: 'Call not allowed' } })
+                .latencyMs
+        ).toBeNull();
+
+        expect(socketInspectorSnapshot()).toHaveLength(0);
+        expect(linkFrameSnapshot()).toHaveLength(7);
+        expect(inspectorStats.frames).toBe(7);
+    });
+
+    it('never lets the session cookies reach the window', () => {
+        const event = recordLinkFrame('in', {
+            t: 'event',
+            p: { event: 'session', data: { userId: 'usr_1', cookies: 'auth=secret' } }
+        });
+        expect(event.raw).not.toContain('secret');
+        const set = recordLinkFrame('out', {
+            i: 1,
+            t: 'call',
+            p: { c: 'WebApi', m: 'SetCookies', a: ['auth=secret'] }
+        });
+        expect(set.raw).not.toContain('secret');
+        recordLinkFrame('out', { i: 2, t: 'call', p: { c: 'WebApi', m: 'GetCookies', a: [] } });
+        const got = recordLinkFrame('in', { i: 2, t: 'result', p: 'auth=secret' });
+        expect(got.raw).not.toContain('secret');
+        // Other results are untouched.
+        recordLinkFrame('out', { i: 3, t: 'call', p: { c: 'SQLite', m: 'Execute', a: ['SELECT 1'] } });
+        expect(recordLinkFrame('in', { i: 3, t: 'result', p: [[1]] }).raw).toContain('[[1]]');
+    });
+
+    it('replays messages and frames in one ordered history', () => {
+        recordSocketMessage(SocketChannel.VRCHAT, 'in', '{"type":"a"}');
+        recordLinkFrame('out', { i: 1, t: 'ping' });
+        recordSocketMessage(SocketChannel.VRCHAT, 'in', '{"type":"b"}');
+        setSocketInspectorEnabled(true);
+        expect(pushed[0].entries.map((entry) => `${entry.channel}:${entry.type}`)).toEqual([
+            'vrchat:a',
+            'link:ping',
+            'vrchat:b'
+        ]);
+        for (let i = 0; i < LINK_FRAME_BUFFER + 3; i++) {
+            recordLinkFrame('in', { t: 'pong' });
+        }
+        expect(linkFrameSnapshot()).toHaveLength(LINK_FRAME_BUFFER);
     });
 
     it('installs the surface the C# side drives', () => {

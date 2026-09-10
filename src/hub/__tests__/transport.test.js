@@ -385,6 +385,20 @@ describe('hub transport over a real socket', () => {
         expect(client.uplink('gamelog-raw', ['x'])).toBe(false);
     });
 
+    it('records every frame of the link for the Socket Inspect window', async () => {
+        const { linkFrameSnapshot, resetSocketInspector } = await import('../client/socketInspector.js');
+        resetSocketInspector();
+        client = createHubConnection({ url, token: TOKEN, autoReconnect: false });
+        await client.connect();
+        await client.call('SQLite', 'Execute', ['SELECT 1', null]);
+        const frames = linkFrameSnapshot().map((entry) => `${entry.direction}:${entry.type}`);
+        expect(frames).toEqual(['out:hello', 'in:challenge', 'out:auth', 'in:welcome', 'out:call', 'in:result']);
+        const result = linkFrameSnapshot().at(-1);
+        expect(result.frameId).toBe(1);
+        expect(result.latencyMs).toBeGreaterThanOrEqual(0);
+        expect(result.wireBytes).toBeGreaterThan(0);
+    });
+
     it('says which Hub an interop error came from', async () => {
         await server.stop();
         ({ server, url } = await startServer({
