@@ -12,7 +12,7 @@
  * rather than on a Raspberry Pi.
  */
 
-import { createRemoteSQLite, createRemoteWebApi, mustRunLocally } from '../client/remoteInterop.js';
+import { createRemoteSQLite, createRemoteWebApi, isHubBoundUrl, mustRunLocally } from '../client/remoteInterop.js';
 import { decodeFrame, encodeFrame, FrameType, isCallAllowed } from '../shared/protocol.js';
 import { createInteropHandler, HubInteropError } from '../server/interopHandler.js';
 
@@ -206,6 +206,41 @@ describe('remote interop', () => {
             expect(mustRunLocally({ uploadFilePUT: true })).toBe(true);
             expect(mustRunLocally({ url: 'https://api/user', method: 'GET' })).toBe(false);
             expect(mustRunLocally(null)).toBe(false);
+        });
+
+        it('knows which hosts carry the VRChat session', () => {
+            expect(isHubBoundUrl('https://api.vrchat.cloud/api/1/auth/user')).toBe(true);
+            expect(isHubBoundUrl('https://files.vrchat.cloud/thumbnails/x.png')).toBe(true);
+            expect(isHubBoundUrl('https://VRCHAT.cloud/')).toBe(true);
+            expect(isHubBoundUrl('https://api.example.test/api/1/x', 'https://api.example.test/api/1')).toBe(true);
+            expect(isHubBoundUrl('https://api.github.com/repos/vrcx-team/VRCX/releases')).toBe(false);
+            expect(isHubBoundUrl('https://avtrdb.example/avatar/1')).toBe(false);
+            expect(isHubBoundUrl('https://notvrchat.cloud.example/')).toBe(false);
+            expect(isHubBoundUrl('https://api/user')).toBe(false);
+            // Not a URL at all: let the Hub report it.
+            expect(isHubBoundUrl('not a url')).toBe(true);
+            expect(isHubBoundUrl(undefined)).toBe(true);
+        });
+
+        it('runs third-party requests on the local WebApi', async () => {
+            const localWebApi = createFakeNativeWebApi();
+            localWebApi.setResponse({ status: 200, message: '{"tag_name":"v1"}' });
+            const webApi = createRemoteWebApi(transport, localWebApi, {
+                endpointDomain: () => 'https://api.vrchat.cloud/api/1'
+            });
+
+            const result = await webApi.Execute({
+                url: 'https://api.github.com/repos/vrcx-team/VRCX/releases',
+                method: 'GET'
+            });
+
+            expect(result).toEqual({ Item1: 200, Item2: '{"tag_name":"v1"}' });
+            expect(localWebApi.calls).toHaveLength(1);
+            expect(transport.sent).toHaveLength(0);
+
+            // The session hosts still go to the Hub.
+            await webApi.Execute({ url: 'https://files.vrchat.cloud/x.png', method: 'GET' });
+            expect(transport.sent).toHaveLength(1);
         });
 
         it('runs uploads on the local WebApi, never over the wire', async () => {

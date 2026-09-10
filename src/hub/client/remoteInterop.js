@@ -44,6 +44,46 @@ export function mustRunLocally(options) {
 }
 
 /**
+ * Whether a request belongs on the Hub's HTTP stack.
+ *
+ * The Hub holds the VRChat session, so anything on `*.vrchat.cloud` -- the
+ * API, the pipeline, and `files.vrchat.cloud`, whose images need the session
+ * cookies -- goes there, as does whatever API endpoint the Hub is signed in
+ * against (a custom one is possible). Everything else is a third party: the
+ * VRCX update check, avatar-provider lookups, image previews of arbitrary
+ * URLs, Sentry. Those carry no session, gain nothing from the round trip, and
+ * would otherwise ship whole images over the sealed socket twice-encoded.
+ *
+ * An unparseable URL is sent to the Hub: that is where the failure will be
+ * reported best, and `webApiService` callers already handle a non-200.
+ *
+ * @param {string | undefined} url
+ * @param {string} [endpointDomain] - the Hub's API endpoint, e.g. `https://api.vrchat.cloud/api/1`
+ * @returns {boolean}
+ */
+export function isHubBoundUrl(url, endpointDomain = '') {
+    let host;
+    try {
+        host = new URL(String(url)).hostname.toLowerCase();
+    } catch {
+        return true;
+    }
+    if (host === 'vrchat.cloud' || host.endsWith('.vrchat.cloud')) {
+        return true;
+    }
+    if (endpointDomain) {
+        try {
+            if (host === new URL(endpointDomain).hostname.toLowerCase()) {
+                return true;
+            }
+        } catch {
+            // A malformed endpoint cannot match anything.
+        }
+    }
+    return false;
+}
+
+/**
  * @typedef {object} HubTransport
  * @property {(className: string, method: string, args: any[]) => Promise<any>} call
  */
@@ -89,19 +129,22 @@ export function createRemoteSQLite(transport) {
 
 /**
  * @param {HubTransport} transport
- * @param {object} localWebApi - the machine-local `WebApi` binding, used for uploads
+ * @param {object} localWebApi - the machine-local `WebApi` binding, used for uploads and third-party URLs
+ * @param {{ endpointDomain?: () => string }} [options] - the Hub's API endpoint, read per request
  * @returns {object} a stand-in for the `WebApi` global
  */
-export function createRemoteWebApi(transport, localWebApi) {
+export function createRemoteWebApi(transport, localWebApi, options = {}) {
+    const { endpointDomain = () => '' } = options;
+
     /**
-     * @param {any} options
+     * @param {any} requestOptions
      * @returns {Promise<{status: number, message: string}>}
      */
-    async function execute(options) {
-        if (mustRunLocally(options)) {
-            return executeLocally(options);
+    async function execute(requestOptions) {
+        if (mustRunLocally(requestOptions) || !isHubBoundUrl(requestOptions?.url, endpointDomain())) {
+            return executeLocally(requestOptions);
         }
-        return transport.call('WebApi', 'Execute', [options]);
+        return transport.call('WebApi', 'Execute', [requestOptions]);
     }
 
     /**

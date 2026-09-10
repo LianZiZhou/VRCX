@@ -15,17 +15,20 @@
  *    index. It stays a plain export.
  *
  * The mode is read at call time rather than at module init, because the mode is
- * decided during boot after this module has already been imported.
+ * decided during boot after this module has already been imported. The
+ * decision itself is read at call time too: some methods are suppressed or
+ * allowed depending on their arguments (`shared/derivedWrites.js`).
  */
 
 import { isMirrorMode } from '../shared/mode.js';
-import { mirrorSuppressedMethods } from '../shared/derivedWrites.js';
+import { isSuppressedOnMirror, mirrorSuppressedMethods } from '../shared/derivedWrites.js';
 
 /**
  * `begin`/`commit` issue bare BEGIN/COMMIT on the shared connection. They have
- * no call sites upstream today, but if one appeared, a mirror client opening a
- * transaction against the Hub's single SQLite connection would stall every
- * other client and the Hub itself.
+ * no call sites upstream today. The transactional database modules
+ * (`activityV2.js`, `mutualGraph.js`) issue their BEGIN/COMMIT through
+ * `sqliteService.executeNonQuery` directly, bypassing this object; those are
+ * serialised on the Hub by `server/sqliteGate.js`, one owner at a time.
  */
 const TRANSACTION_METHODS = new Set(['begin', 'commit']);
 
@@ -49,7 +52,7 @@ function record(method) {
  * @returns {object} the same object in non-mirror modes, a guarded proxy otherwise
  */
 export function guardDatabase(database) {
-    const suppressed = mirrorSuppressedMethods();
+    const candidates = mirrorSuppressedMethods();
 
     return new Proxy(database, {
         get(target, prop, receiver) {
@@ -57,13 +60,16 @@ export function guardDatabase(database) {
             if (typeof value !== 'function' || typeof prop !== 'string') {
                 return value;
             }
-            if (!suppressed.has(prop) && !TRANSACTION_METHODS.has(prop)) {
+            if (!candidates.has(prop) && !TRANSACTION_METHODS.has(prop)) {
                 return value;
             }
             if (!isMirrorMode()) {
                 return value;
             }
-            return function suppressedWrite() {
+            return function guardedWrite(...args) {
+                if (!TRANSACTION_METHODS.has(prop) && !isSuppressedOnMirror(prop, args)) {
+                    return Reflect.apply(value, this, args);
+                }
                 record(prop);
                 // Callers `await` these; resolve rather than returning
                 // undefined so a mirror client behaves like a fast success.

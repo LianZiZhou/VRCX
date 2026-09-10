@@ -88,7 +88,11 @@ export function handleHubConnectionState(state, detail) {
             clearOfferTimer();
             if (disconnectedSince) {
                 disconnectedSince = null;
-                ui().then(({ toast }) => toast.success('Reconnected to the VRCX Hub'));
+                ui().then(({ toast }) =>
+                    toast.success('Reconnected to the VRCX Hub', {
+                        description: 'Resyncing what was missed…'
+                    })
+                );
             }
             break;
 

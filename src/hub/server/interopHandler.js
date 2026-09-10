@@ -22,18 +22,23 @@ export class HubInteropError extends Error {
 
 /**
  * @param {object} natives - `{ SQLite, WebApi }` bindings
- * @returns {(className: string, method: string, args: any[]) => Promise<any>}
+ * @param {{ sqliteForClient?: (client: object | undefined) => object }} [options] -
+ *   a per-client view of the SQLite binding (the transaction gate in
+ *   `server/sqliteGate.js` hands out one per owner); defaults to `natives.SQLite`
+ * @returns {(className: string, method: string, args: any[], client?: object) => Promise<any>}
  */
-export function createInteropHandler(natives) {
-    const { SQLite, WebApi } = natives;
+export function createInteropHandler(natives, options = {}) {
+    const { WebApi } = natives;
+    const { sqliteForClient = () => natives.SQLite } = options;
 
     /**
+     * @param {object} sqlite
      * @param {string} sql
      * @param {Record<string, any> | null} wireArgs
      * @returns {Promise<any[][]>}
      */
-    async function query(sql, wireArgs) {
-        const json = await SQLite.ExecuteJson(sql, argsFromWire(wireArgs));
+    async function query(sqlite, sql, wireArgs) {
+        const json = await sqlite.ExecuteJson(sql, argsFromWire(wireArgs));
         if (!json) {
             return [];
         }
@@ -50,7 +55,7 @@ export function createInteropHandler(natives) {
         return { status: data.status, message: data.message };
     }
 
-    return async function handleCall(className, method, args = []) {
+    return async function handleCall(className, method, args = [], client = undefined) {
         if (!isCallAllowed(className, method)) {
             throw new HubInteropError(`Call not allowed: ${className}.${method}`, 'not-allowed');
         }
@@ -58,10 +63,10 @@ export function createInteropHandler(natives) {
         switch (`${className}.${method}`) {
             case 'SQLite.Execute':
             case 'SQLite.ExecuteJson':
-                return query(args[0], args[1] ?? null);
+                return query(sqliteForClient(client), args[0], args[1] ?? null);
 
             case 'SQLite.ExecuteNonQuery':
-                return SQLite.ExecuteNonQuery(args[0], argsFromWire(args[1] ?? null));
+                return sqliteForClient(client).ExecuteNonQuery(args[0], argsFromWire(args[1] ?? null));
 
             case 'WebApi.Execute':
                 return httpExecute(args[0]);
