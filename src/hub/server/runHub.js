@@ -138,7 +138,8 @@ export async function runHub(options = {}) {
         natives = await createNativeBridge({
             rootDir,
             configDir: config.configDir,
-            version: HUB_VERSION
+            version: HUB_VERSION,
+            log
         });
         // The one place the .NET side's HTTP failure reason can still be read
         // before upstream code reduces it to `{}`.

@@ -6,11 +6,39 @@
  * which Node shares. So a request that fails with status 0 there can mean
  * "this machine has no route to VRChat" or ".NET specifically cannot make
  * the request", and on a headless box the two need very different fixes.
- * Asking Node's own `fetch` for the same endpoint tells them apart.
+ * Asking Node's own HTTP stack for the same endpoint tells them apart.
+ *
+ * `node:https` rather than `fetch`: by the time this runs, the DOM shim has
+ * installed happy-dom's `fetch` on the global, and that one enforces a
+ * same-origin policy against a page that does not exist here. The first
+ * version of this probe reported "Cross-Origin Request Blocked" as the
+ * network's fault.
  */
+
+import { request } from 'node:https';
 
 const PROBE_URL = 'https://api.vrchat.cloud/api/1/config';
 const PROBE_TIMEOUT_MS = 10000;
+
+/**
+ * @param {string} url
+ * @returns {Promise<{ status: number }>}
+ */
+function probeWithHttps(url) {
+    return new Promise((resolve, reject) => {
+        const req = request(
+            url,
+            { method: 'GET', headers: { 'User-Agent': 'VRCX-Hub reachability probe' }, timeout: PROBE_TIMEOUT_MS },
+            (res) => {
+                res.resume();
+                resolve({ status: res.statusCode ?? 0 });
+            }
+        );
+        req.on('timeout', () => req.destroy(new Error(`no response within ${PROBE_TIMEOUT_MS / 1000}s`)));
+        req.on('error', reject);
+        req.end();
+    });
+}
 
 /**
  * @typedef {object} ReachabilityReport
@@ -20,17 +48,14 @@ const PROBE_TIMEOUT_MS = 10000;
  */
 
 /**
- * @param {{ configDir: string, fetchImpl?: typeof fetch, url?: string }} options
+ * @param {{ configDir: string, probe?: (url: string) => Promise<{ status: number }>, url?: string }} options
  * @returns {Promise<ReachabilityReport>}
  */
 export async function diagnoseVrchatReachability(options) {
-    const { configDir, fetchImpl = globalThis.fetch, url = PROBE_URL } = options;
+    const { configDir, probe = probeWithHttps, url = PROBE_URL } = options;
     const dotnetLog = `${configDir}/logs/VRCX.log`;
     try {
-        const response = await fetchImpl(url, {
-            signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
-            headers: { 'User-Agent': 'VRCX-Hub reachability probe' }
-        });
+        const response = await probe(url);
         return {
             reachable: true,
             detail: `Node reached ${url} (HTTP ${response.status}) but the .NET side could not.`,
@@ -41,7 +66,7 @@ export async function diagnoseVrchatReachability(options) {
             ]
         };
     } catch (err) {
-        const cause = err?.cause?.message ?? err?.message ?? String(err);
+        const cause = err?.code ? `${err.code}: ${err.message}` : (err?.cause?.message ?? err?.message ?? String(err));
         return {
             reachable: false,
             detail: `This machine cannot reach ${url}: ${cause}`,
