@@ -17,6 +17,8 @@
  * module scope, so this module never imports it back.
  */
 
+import { recordSocketMessage, SocketChannel } from '../client/socketInspector.js';
+
 /** @type {((raw: string) => void) | null} */
 let observer = null;
 
@@ -47,6 +49,7 @@ export function setPipelineInjector(fn) {
  * @param {string} raw
  */
 export function emitPipelineMessage(raw) {
+    recordSocketMessage(SocketChannel.VRCHAT, 'in', raw);
     if (!observer) {
         return;
     }
@@ -67,6 +70,7 @@ export function emitPipelineMessage(raw) {
  * @param {string} raw
  */
 export function injectPipelineMessage(raw) {
+    recordSocketMessage(SocketChannel.VRCHAT, 'in', raw, { via: 'hub' });
     if (!injector) {
         return;
     }

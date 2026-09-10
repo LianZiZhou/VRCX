@@ -239,6 +239,12 @@ namespace VRCX
             Instance.Browser.ShowDevTools();
         }
 
+        // [hub] The socket traffic of the main window, in its own window.
+        private void TrayMenu_SocketInspect_Click(object sender, System.EventArgs e)
+        {
+            SocketInspectForm.Open();
+        }
+
         private void TrayMenu_ForceCrash_Click(object sender, System.EventArgs e)
         {
             Instance.Browser.LoadUrl("chrome://crash");
