@@ -55,6 +55,33 @@ function configureDotnetRuntime(rootDir) {
 }
 
 /**
+ * Runtime switches the .NET side needs on this platform, set before the CLR
+ * starts so it reads them at initialisation.
+ *
+ * TLS session resumption is turned off on Linux. .NET 10's SslStream on
+ * OpenSSL 3.5 (Debian 13, Raspberry Pi OS Trixie) fails to decrypt the first
+ * record of every HTTPS response -- `Decrypt failed with OpenSSL error -
+ * SSL_ERROR_SSL` -- for any host, while curl on the same box is fine. Found
+ * on a Pi 5 by trying the documented switches one at a time:
+ * `DOTNET_SYSTEM_NET_SECURITY_DISABLETLSRESUME=1` was the one that turned a
+ * failure into a 200. HttpClient pools its connections, so the cost is one
+ * full handshake per connection instead of an abbreviated one. A value set in
+ * the environment by the operator is left alone.
+ *
+ * @param {Record<string, string | undefined>} [env]
+ * @param {string} [platform]
+ * @returns {string[]} the variables this set, for the start-up log
+ */
+export function configureDotnetSwitches(env = process.env, platform = process.platform) {
+    const set = [];
+    if (platform === 'linux' && env.DOTNET_SYSTEM_NET_SECURITY_DISABLETLSRESUME === undefined) {
+        env.DOTNET_SYSTEM_NET_SECURITY_DISABLETLSRESUME = '1';
+        set.push('DOTNET_SYSTEM_NET_SECURITY_DISABLETLSRESUME=1');
+    }
+    return set;
+}
+
+/**
  * Where the generated node-api-dotnet shim may live, in order of preference.
  *
  * `dotnet/` is the layout inside a release zip; `build/Electron/` is where a
@@ -159,6 +186,9 @@ export async function createNativeBridge(options) {
     const { rootDir, configDir, version, log = () => {} } = options;
 
     const bundled = configureDotnetRuntime(rootDir);
+    for (const setting of configureDotnetSwitches()) {
+        log(`.NET switch: ${setting}`);
+    }
     const assemblyPath = loadAssembly(rootDir);
 
     const dotnet = require('node-api-dotnet/net10.0');

@@ -77,7 +77,14 @@ changes into its own directory first, because the Hub resolves `dotnet/` and
 `dotnet-runtime/` relative to the working directory.
 
 Both variants carry a private .NET runtime, which the Hub prefers over any
-system install. The startup log says which runtimes it actually got:
+system install. What .NET does not bring along is TLS: on Linux it uses the
+system OpenSSL, and on OpenSSL 3.5 (Debian 13, Raspberry Pi OS Trixie) .NET
+10's TLS session resumption is broken -- every HTTPS response fails with
+`Decrypt failed with OpenSSL error - SSL_ERROR_SSL` while curl on the same box
+works. The Hub therefore sets `DOTNET_SYSTEM_NET_SECURITY_DISABLETLSRESUME=1`
+for its own process on Linux before the CLR starts (`server/nativeBridge.js`),
+unless you have set that variable yourself. The startup log says which
+runtimes it actually got, and which switches it set:
 
 ```
 [hub] Node 24.20.0 on win32-x64
