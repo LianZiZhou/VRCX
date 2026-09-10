@@ -43,6 +43,7 @@ import { HubMode, setHubMode } from '../shared/mode.js';
 import { injectPipelineMessage } from '../shared/pipelineRelay.js';
 import { suppressionStats } from './databaseGuard.js';
 import { notifyUplinkReady, replayFromHub, setUplinkSender, uplinkQueueDepth, uplinkStats } from './uplink.js';
+import { recordSocketMessage, SocketChannel } from './socketInspector.js';
 import { watchState } from '../../services/watchState.js';
 
 /** How long to wait for a Hub before falling back to standalone. */
@@ -329,7 +330,13 @@ export async function initMirrorMode(options) {
         globalThis.window.WebApi = globalThis.WebApi;
     }
 
-    setUplinkSender((kind, data) => connection.uplink(kind, data));
+    setUplinkSender((kind, data) => {
+        const sent = connection.uplink(kind, data);
+        if (sent) {
+            recordSocketMessage(SocketChannel.UPLINK, 'out', data, { type: kind });
+        }
+        return sent;
+    });
     setHubMode(HubMode.MIRROR);
 
     hubClientState.active = true;
@@ -463,6 +470,12 @@ function replayEcho(event, data) {
  */
 function handleHubEvent(event, data, localWebApi) {
     hubClientState.stats.lastEventAt = Date.now();
+    if (event !== EventType.PIPELINE) {
+        // The relayed pipeline is recorded where it is injected, as `vrchat`.
+        recordSocketMessage(SocketChannel.HUB, 'in', event === EventType.SESSION ? { ...data, cookies: '…' } : data, {
+            type: event
+        });
+    }
     switch (event) {
         case EventType.PIPELINE: {
             if (!relayGate.isFriendsLoaded()) {
