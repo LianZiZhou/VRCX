@@ -121,3 +121,18 @@ describe('reachability probe', () => {
         expect(report.detail).not.toMatch(/Cross-Origin/);
     });
 });
+
+describe('.NET runtime switches', () => {
+    it('disables TLS resumption on Linux unless the operator decided', async () => {
+        const { configureDotnetSwitches } = await import('../server/nativeBridge.js');
+        const env = {};
+        expect(configureDotnetSwitches(env, 'linux')).toEqual(['DOTNET_SYSTEM_NET_SECURITY_DISABLETLSRESUME=1']);
+        expect(env.DOTNET_SYSTEM_NET_SECURITY_DISABLETLSRESUME).toBe('1');
+
+        const chosen = { DOTNET_SYSTEM_NET_SECURITY_DISABLETLSRESUME: '0' };
+        expect(configureDotnetSwitches(chosen, 'linux')).toEqual([]);
+        expect(chosen.DOTNET_SYSTEM_NET_SECURITY_DISABLETLSRESUME).toBe('0');
+
+        expect(configureDotnetSwitches({}, 'win32')).toEqual([]);
+    });
+});
