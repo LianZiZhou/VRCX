@@ -77,6 +77,13 @@ export function initWebsocket() {
         })
         .catch((err) => {
             console.error('WebSocket init error:', err);
+            // [hub] Try again: one failed token fetch after a network blip
+            // used to leave the pipeline down until "refresh friends".
+            workerTimers.setTimeout(() => {
+                if (watchState.isLoggedIn) {
+                    initWebsocket();
+                }
+            }, 5000);
         });
 }
 

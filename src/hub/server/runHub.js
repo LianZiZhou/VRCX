@@ -33,6 +33,7 @@ import { withRequestCoalescing } from './requestCoalescer.js';
 import { addGameLogEntry, tryLoadPlayerList } from '../../coordinators/gameLogCoordinator';
 import { AppDebug } from '../../services/appConfig';
 import { wsState } from '../../services/websocket.js';
+import { watchState } from '../../services/watchState.js';
 
 import configRepository from '../../services/config';
 
@@ -249,7 +250,7 @@ export async function runHub(options = {}) {
         hubVersion: HUB_VERSION,
         expectedSchemaVersion: EXPECTED_DATABASE_VERSION,
         getStatus: () => ({
-            loggedIn: Boolean(stores.user.currentUser?.id),
+            loggedIn: watchState.isLoggedIn,
             userId: stores.user.currentUser?.id ?? null,
             displayName: stores.user.currentUser?.displayName ?? null,
             clientCount: server.clientCount
@@ -318,9 +319,9 @@ export async function runHub(options = {}) {
         const cookies = await natives.WebApi.GetCookies();
         const userId = stores.user.currentUser?.id ?? null;
         return {
-            fingerprint: `${userId}:${cookies?.length ?? 0}:${cookies ?? ''}`,
+            fingerprint: `${watchState.isLoggedIn}:${userId}:${cookies?.length ?? 0}:${cookies ?? ''}`,
             session: {
-                loggedIn: Boolean(userId),
+                loggedIn: watchState.isLoggedIn,
                 userId,
                 displayName: stores.user.currentUser?.displayName ?? null,
                 cookies
@@ -369,7 +370,7 @@ export async function runHub(options = {}) {
             // Advertises the `admin` frame; the migration tool checks for it.
             admin: true,
             databaseVersion: stores.vrcx.state.databaseVersion ?? 0,
-            loggedIn: Boolean(stores.user.currentUser?.id),
+            loggedIn: watchState.isLoggedIn,
             userId: stores.user.currentUser?.id ?? null,
             displayName: stores.user.currentUser?.displayName ?? null,
             // Which HTTP goes through the Hub: `client/remoteInterop.js`.
@@ -486,7 +487,7 @@ export async function runHub(options = {}) {
         host: config.host,
         getStatus: () => ({
             version: HUB_VERSION,
-            loggedIn: Boolean(stores.user.currentUser?.id),
+            loggedIn: watchState.isLoggedIn,
             displayName: stores.user.currentUser?.displayName ?? null,
             pipelineConnected: wsState.connected,
             clientCount: server.clientCount,
