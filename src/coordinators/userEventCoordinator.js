@@ -114,7 +114,9 @@ export async function runHandleUserUpdateFlow(
             );
         }
         if (previousLocation === 'offline') {
-            previousLocation = '';
+            // [hub] Coming online while traveling leaves the Online entry
+            // without a location; keep the arrival as GPS.
+            previousLocation = props.location[1] === 'traveling' ? 'traveling' : '';
         }
         if (!previousLocation) {
             // no previous location
