@@ -38,6 +38,7 @@ namespace VRCX
             this.TrayMenu = new ContextMenuStrip(this.components);
             this.TrayMenu_Open = new ToolStripMenuItem();
             this.TrayMenu_DevTools = new ToolStripMenuItem();
+            this.TrayMenu_SocketInspect = new ToolStripMenuItem(); // [hub]
             this.TrayMenu_ForceCrash = new ToolStripMenuItem();
             this.TrayMenu_Separator = new ToolStripSeparator();
             this.TrayMenu_Quit = new ToolStripMenuItem();
@@ -51,6 +52,7 @@ namespace VRCX
             //
             this.TrayMenu.Items.Add(this.TrayMenu_Open);
             this.TrayMenu.Items.Add(this.TrayMenu_DevTools);
+            this.TrayMenu.Items.Add(this.TrayMenu_SocketInspect); // [hub]
             if (Program.LaunchDebug)
                 this.TrayMenu.Items.Add(this.TrayMenu_ForceCrash);
             this.TrayMenu.Items.Add(this.TrayMenu_Separator);
@@ -72,6 +74,13 @@ namespace VRCX
             this.TrayMenu_DevTools.Size = new Size(131, 22);
             this.TrayMenu_DevTools.Text = "DevTools";
             this.TrayMenu_DevTools.Click += new EventHandler(this.TrayMenu_DevTools_Click);
+            //
+            // TrayMenu_SocketInspect [hub]
+            //
+            this.TrayMenu_SocketInspect.Name = "TrayMenu_SocketInspect";
+            this.TrayMenu_SocketInspect.Size = new Size(131, 22);
+            this.TrayMenu_SocketInspect.Text = "Socket Inspect";
+            this.TrayMenu_SocketInspect.Click += new EventHandler(this.TrayMenu_SocketInspect_Click);
             //
             // TrayMenu_ForceCrash
             //
@@ -122,6 +131,7 @@ namespace VRCX
         private ContextMenuStrip TrayMenu;
         private ToolStripMenuItem TrayMenu_Open;
         private ToolStripMenuItem TrayMenu_DevTools;
+        private ToolStripMenuItem TrayMenu_SocketInspect; // [hub]
         private ToolStripMenuItem TrayMenu_ForceCrash;
         private ToolStripSeparator TrayMenu_Separator;
         private ToolStripMenuItem TrayMenu_Quit;
