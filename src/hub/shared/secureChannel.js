@@ -115,6 +115,10 @@ function ivForCounter(counter) {
  * non-monotonic counters, which the receiver would (correctly) treat as
  * tampering.
  *
+ * The counter is taken inside the chain, after the frame has been encoded: a
+ * frame that cannot be serialised must not burn a number, or every frame
+ * after it would be rejected as a gap.
+ *
  * @param {CryptoKey} key
  * @returns {{ seal: (frame: object) => Promise<Uint8Array>, counter: () => bigint }}
  */
@@ -128,9 +132,9 @@ export function createSealer(key) {
          * @returns {Promise<Uint8Array>} counter prefix followed by ciphertext
          */
         seal(frame) {
-            const seq = counter++;
             const result = chain.then(async () => {
                 const plaintext = encoder.encode(JSON.stringify(frame));
+                const seq = counter++;
                 const ciphertext = new Uint8Array(
                     await webcrypto().subtle.encrypt({ name: 'AES-GCM', iv: ivForCounter(seq) }, key, plaintext)
                 );
@@ -163,45 +167,69 @@ export class ChannelSecurityError extends Error {
 /**
  * Opens frames for one direction, enforcing strictly increasing counters.
  *
+ * Serialised the same way as the sealer, and for a reason that only shows up
+ * under load: a socket's message events fire back to back for frames that
+ * arrived in one read, and decryption is asynchronous. Without the chain,
+ * every frame in the burst checked its counter against the *same* expected
+ * value while the first one was still being decrypted, and all but the first
+ * were reported as dropped -- which is exactly what a desktop client's start-up
+ * flurry of queries produced against a real Hub.
+ *
  * @param {CryptoKey} key
  * @returns {{ open: (bytes: ArrayBuffer | Uint8Array) => Promise<object> }}
  */
 export function createOpener(key) {
     let expected = 0n;
+    let chain = Promise.resolve();
+
+    /**
+     * @param {ArrayBuffer | Uint8Array} bytes
+     * @returns {Promise<object>}
+     */
+    async function openNow(bytes) {
+        const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+        if (data.length <= COUNTER_BYTES) {
+            throw new ChannelSecurityError('Truncated hub frame');
+        }
+        const seq = new DataView(data.buffer, data.byteOffset, data.byteLength).getBigUint64(0, false);
+        if (seq < expected) {
+            throw new ChannelSecurityError(`Replayed or reordered hub frame (seq ${seq})`);
+        }
+        if (seq > expected) {
+            throw new ChannelSecurityError(`Dropped hub frame (expected ${expected}, got ${seq})`);
+        }
+
+        let plaintext;
+        try {
+            plaintext = await webcrypto().subtle.decrypt(
+                { name: 'AES-GCM', iv: ivForCounter(seq) },
+                key,
+                data.subarray(COUNTER_BYTES)
+            );
+        } catch {
+            // A bad tag means either the wrong token or a tampered frame.
+            // They are indistinguishable here, and should be.
+            throw new ChannelSecurityError('Hub frame failed authentication');
+        }
+
+        expected = seq + 1n;
+        return JSON.parse(decoder.decode(plaintext));
+    }
 
     return {
         /**
          * @param {ArrayBuffer | Uint8Array} bytes
          * @returns {Promise<object>}
          */
-        async open(bytes) {
-            const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-            if (data.length <= COUNTER_BYTES) {
-                throw new ChannelSecurityError('Truncated hub frame');
-            }
-            const seq = new DataView(data.buffer, data.byteOffset, data.byteLength).getBigUint64(0, false);
-            if (seq < expected) {
-                throw new ChannelSecurityError(`Replayed or reordered hub frame (seq ${seq})`);
-            }
-            if (seq > expected) {
-                throw new ChannelSecurityError(`Dropped hub frame (expected ${expected}, got ${seq})`);
-            }
-
-            let plaintext;
-            try {
-                plaintext = await webcrypto().subtle.decrypt(
-                    { name: 'AES-GCM', iv: ivForCounter(seq) },
-                    key,
-                    data.subarray(COUNTER_BYTES)
-                );
-            } catch {
-                // A bad tag means either the wrong token or a tampered frame.
-                // They are indistinguishable here, and should be.
-                throw new ChannelSecurityError('Hub frame failed authentication');
-            }
-
-            expected = seq + 1n;
-            return JSON.parse(decoder.decode(plaintext));
+        open(bytes) {
+            const result = chain.then(() => openNow(bytes));
+            // A rejected frame ends that connection anyway; the chain itself
+            // must not stay rejected.
+            chain = result.then(
+                () => undefined,
+                () => undefined
+            );
+            return result;
         }
     };
 }
