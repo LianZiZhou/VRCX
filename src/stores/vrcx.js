@@ -454,13 +454,14 @@ export const useVrcxStore = defineStore('Vrcx', () => {
      * @param json
      */
     function ipcEvent(json) {
-        if (!watchState.isLoggedIn) {
-            return;
-        }
         // [hub] A mirror client sends Photon events to the Hub, which writes
         // them once and broadcasts back; the echo is not taken and is
-        // processed here as usual.
+        // processed here as usual. Before the logged-in check: what Photon
+        // saw while this client was still signing in belongs to the Hub too.
         if (uplinkIpcEvent(json)) {
+            return;
+        }
+        if (!watchState.isLoggedIn) {
             return;
         }
         let data;

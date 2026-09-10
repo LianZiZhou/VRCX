@@ -25,7 +25,7 @@ import { watchState } from '../services/watchState';
 // [hub] The Hub drives the data-owning refreshes and has no local game to
 // poll; a mirror client's uplink happens in the coordinators. See
 // src/hub/shared/mode.js and src/hub/client/uplink.js.
-import { isHubMode } from '../hub/shared/mode.js';
+import { isHubMode, isMirrorMode } from '../hub/shared/mode.js';
 
 import * as workerTimers from 'worker-timers';
 
@@ -120,17 +120,24 @@ export const useUpdateLoopStore = defineStore('UpdateLoop', () => {
                 ) {
                     state.nextClearVRCXCacheCheck =
                         vrcxStore.clearVRCXCacheFrequency / 2;
-                    clearVRCXCache();
+                    // [hub] The cache is the Hub's; a mirror must not evict from it.
+                    if (!isMirrorMode()) {
+                        clearVRCXCache();
+                    }
                 }
                 if (--state.nextDiscordUpdate <= 0) {
                     state.nextDiscordUpdate = 3;
-                    if (discordPresenceSettingsStore.discordActive) {
+                    // [hub] A Hub box has no Discord.
+                    if (!isHubMode() && discordPresenceSettingsStore.discordActive) {
                         discordPresenceSettingsStore.updateDiscord();
                     }
                 }
                 if (--state.nextAutoStateChange <= 0) {
                     state.nextAutoStateChange = 3;
-                    updateAutoStateChange();
+                    // [hub] One writer of the account's status: the Hub.
+                    if (!isMirrorMode()) {
+                        updateAutoStateChange();
+                    }
                 }
                 if (LINUX && !isHubMode() && --state.nextGetLogCheck <= 0) {
                     // [hub] The Hub has no VRChat install to tail; its game log

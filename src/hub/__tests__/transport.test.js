@@ -12,7 +12,7 @@ import { createHubServer } from '../server/wsServer.js';
 import { createInteropHandler } from '../server/interopHandler.js';
 import { EventType, PROTOCOL_VERSION, RejectReason } from '../shared/protocol.js';
 import { buildAuthProof, createOpener, createSealer, deriveChannelKeys, randomNonce } from '../shared/secureChannel.js';
-import { withRequestCoalescing } from '../server/requestCoalescer.js';
+import { coalescingKey, withRequestCoalescing } from '../server/requestCoalescer.js';
 
 const TOKEN = 'test-token-0123456789';
 
@@ -111,7 +111,12 @@ describe('hub transport over a real socket', () => {
                 raw.send(
                     JSON.stringify({
                         t: 'hello',
-                        p: { protocol: PROTOCOL_VERSION + 99, client: 'x', clientNonce: randomNonce() }
+                        p: {
+                            protocol: PROTOCOL_VERSION + 99,
+                            client: 'x',
+                            clientNonce: randomNonce(),
+                            clientId: randomNonce()
+                        }
                     })
                 );
             };
@@ -215,7 +220,7 @@ describe('hub transport over a real socket', () => {
                 raw.send(
                     JSON.stringify({
                         t: 'hello',
-                        p: { protocol: PROTOCOL_VERSION, client: 'probe', clientNonce }
+                        p: { protocol: PROTOCOL_VERSION, client: 'probe', clientNonce, clientId: randomNonce() }
                     })
                 );
             };
@@ -260,7 +265,7 @@ describe('hub transport over a real socket', () => {
                 raw.send(
                     JSON.stringify({
                         t: 'hello',
-                        p: { protocol: PROTOCOL_VERSION, client: 'probe', clientNonce }
+                        p: { protocol: PROTOCOL_VERSION, client: 'probe', clientNonce, clientId: randomNonce() }
                     })
                 );
             };
@@ -287,6 +292,111 @@ describe('hub transport over a real socket', () => {
         expect(() => createHubServer({ port: 0, token: '', handleCall: async () => null })).toThrow(
             /token is required/i
         );
+    });
+
+    it('identifies the client by a stable id and tells the Hub when it is welcomed', async () => {
+        await server.stop();
+        const connected = [];
+        ({ server, url } = await startServer({
+            onConnect: (socket) => connected.push({ clientId: socket.clientId, name: socket.clientName })
+        }));
+
+        client = createHubConnection({ url, token: TOKEN, clientName: 'desk', autoReconnect: false });
+        await client.connect();
+
+        await vi.waitFor(() => expect(connected).toHaveLength(1));
+        expect(connected[0]).toEqual({ clientId: client.clientId, name: 'desk' });
+        expect(client.clientId).toMatch(/^[0-9a-f]{32}$/);
+
+        // The same process reconnecting presents the same id.
+        const again = createHubConnection({ url, token: TOKEN, autoReconnect: false });
+        await again.connect();
+        expect(again.clientId).toBe(client.clientId);
+        again.close();
+    });
+
+    it('refuses a hello without a client id', async () => {
+        const raw = new WebSocket(url);
+        const rejection = await new Promise((resolve) => {
+            raw.onopen = () => {
+                raw.send(
+                    JSON.stringify({
+                        t: 'hello',
+                        p: { protocol: PROTOCOL_VERSION, client: 'old', clientNonce: randomNonce() }
+                    })
+                );
+            };
+            raw.onmessage = (message) => resolve(JSON.parse(message.data));
+        });
+        raw.close();
+
+        expect(rejection.t).toBe('reject');
+        expect(rejection.p.reason).toBe(RejectReason.BAD_HANDSHAKE);
+    });
+
+    it('can address one client rather than all of them', async () => {
+        const received = [];
+        client = createHubConnection({
+            url,
+            token: TOKEN,
+            autoReconnect: false,
+            onEvent: (event, data) => received.push({ who: 'first', event, data })
+        });
+        await client.connect();
+        const second = createHubConnection({
+            url,
+            token: TOKEN,
+            autoReconnect: false,
+            onEvent: (event, data) => received.push({ who: 'second', event, data })
+        });
+        await second.connect();
+
+        const target = server.clientList.find((socket) => socket !== server.clientList[0]);
+        await server.sendTo(target, EventType.SESSION, { cookies: 'x' });
+        await server.broadcast(EventType.HUB_STATE, { clientCount: 2 });
+
+        await vi.waitFor(() => expect(received.filter((r) => r.event === EventType.HUB_STATE)).toHaveLength(2));
+        const sessions = received.filter((r) => r.event === EventType.SESSION);
+        expect(sessions).toHaveLength(1);
+        second.close();
+    });
+
+    it('hands the calling client to the call handler', async () => {
+        await server.stop();
+        const seen = [];
+        ({ server, url } = await startServer({
+            handleCall: async (c, m, a, socket) => {
+                seen.push(socket?.clientId);
+                return [];
+            }
+        }));
+        client = createHubConnection({ url, token: TOKEN, autoReconnect: false });
+        await client.connect();
+        await client.call('SQLite', 'Execute', ['SELECT 1', null]);
+        expect(seen).toEqual([client.clientId]);
+    });
+
+    it('answers synchronously whether an uplink frame went out', async () => {
+        client = createHubConnection({ url, token: TOKEN, autoReconnect: false });
+        expect(client.uplink('gamelog-raw', ['x'])).toBe(false);
+        await client.connect();
+        expect(client.uplink('gamelog-raw', ['x'])).toBe(true);
+        client.close();
+        expect(client.uplink('gamelog-raw', ['x'])).toBe(false);
+    });
+
+    it('says which Hub an interop error came from', async () => {
+        await server.stop();
+        ({ server, url } = await startServer({
+            handleCall: async () => {
+                throw new Error('database or disk is full');
+            }
+        }));
+        client = createHubConnection({ url, token: TOKEN, autoReconnect: false });
+        await client.connect();
+        const failure = await client.call('SQLite', 'Execute', ['SELECT 1', null]).catch((err) => err);
+        expect(failure.message).toMatch(/^Hub \(127\.0\.0\.1:\d+\): database or disk is full$/);
+        expect(failure.hubMessage).toBe('database or disk is full');
     });
 });
 
@@ -339,6 +449,40 @@ describe('cross-client GET coalescing', () => {
         await Promise.all([handler('WebApi', 'Execute', [options]), handler('WebApi', 'Execute', [options])]);
 
         expect(upstreamCalls).toBe(2);
+    });
+
+    it('keeps GETs apart when their headers differ', async () => {
+        let upstreamCalls = 0;
+        let release;
+        const gate = new Promise((resolve) => {
+            release = resolve;
+        });
+        const handler = withRequestCoalescing(async () => {
+            upstreamCalls++;
+            await gate;
+            return { status: 200, message: '{}' };
+        });
+
+        const url = 'https://api.vrchat.cloud/api/1/worlds/wrld_1';
+        const a = handler('WebApi', 'Execute', [{ url, method: 'GET' }]);
+        const b = handler('WebApi', 'Execute', [{ url, method: 'GET', headers: { Accept: 'image/png' } }]);
+        release();
+        await Promise.all([a, b]);
+
+        expect(upstreamCalls).toBe(2);
+        expect(coalescingKey({ url, method: 'get', headers: { B: 1, A: 2 } })).toBe(`GET ${url} a=2&b=1`);
+    });
+
+    it('passes the calling client through to the wrapped handler', async () => {
+        const seen = [];
+        const handler = withRequestCoalescing(async (c, m, a, client) => {
+            seen.push(client);
+            return { status: 200, message: '{}' };
+        });
+        const who = { clientId: 'abc' };
+        await handler('WebApi', 'Execute', [{ url: 'https://api.vrchat.cloud/api/1/x', method: 'GET' }], who);
+        await handler('SQLite', 'Execute', ['SELECT 1', null], who);
+        expect(seen).toEqual([who, who]);
     });
 });
 

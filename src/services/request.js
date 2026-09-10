@@ -13,6 +13,8 @@ import { i18n } from '../plugins/i18n';
 import { statusCodes } from '../shared/constants/api.js';
 import { watchState } from './watchState';
 
+import { isMirrorMode } from '../hub/shared/mode.js'; // [hub]
+
 import webApiService from './webapi.js';
 
 const pendingGetRequests = new Map();
@@ -168,7 +170,10 @@ export function request(endpoint, options) {
             if (parsed.hasApiError) {
                 if (parsed.status === 401) {
                     if (parsed.data.error.message === '"Missing Credentials"') {
-                        authStore.handleAutoLogin();
+                        // [hub] The session is the Hub's; it re-authenticates, not the mirror.
+                        if (!isMirrorMode()) {
+                            authStore.handleAutoLogin();
+                        }
                         $throw(
                             401,
                             t('api.error.message.missing_credentials'),

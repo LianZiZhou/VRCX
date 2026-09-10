@@ -25,7 +25,7 @@ import { toast } from 'vue-sonner';
 
 // [hub] A mirror client sends game log lines to the Hub instead of
 // processing them; the Hub's echo re-enters below. See src/hub/client/uplink.js.
-import { uplinkGameLogLine } from '../hub/client/uplink.js';
+import { uplinkGameLogBacklog, uplinkGameLogLine } from '../hub/client/uplink.js';
 
 import { useAdvancedSettingsStore } from '../stores/settings/advanced';
 import { useFriendStore } from '../stores/friend';
@@ -544,8 +544,12 @@ async function updateGameLog(dateTill) {
     await new Promise((resolve) => {
         workerTimers.setTimeout(resolve, 10000);
     });
+    const entries = await gameLogService.getAll();
+    if (uplinkGameLogBacklog(entries)) {
+        return; // [hub] a mirror sends the backlog to the Hub; its echo re-enters addGameLogEntry
+    }
     let location = '';
-    for (const gameLog of await gameLogService.getAll()) {
+    for (const gameLog of entries) {
         if (gameLog.type === 'location') {
             location = gameLog.location;
         }
