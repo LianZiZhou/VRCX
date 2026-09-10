@@ -20,6 +20,10 @@ import { useWorldStore } from '../stores/world';
 
 import configRepository from '../services/config';
 
+// [hub] A mirror client also tells the Hub, which owns the sessions this
+// state opens and closes. See src/hub/client/uplink.js.
+import { uplinkGameState } from '../hub/client/uplink.js';
+
 import * as workerTimers from 'worker-timers';
 
 /**
@@ -80,6 +84,7 @@ export async function runUpdateIsGameRunningFlow(isGameRunningArg, isSteamVRRunn
     if (advancedSettingsStore.gameLogDisabled) {
         return;
     }
+    uplinkGameState({ isGameRunning: isGameRunningArg, isSteamVRRunning: isSteamVRRunningArg }); // [hub]
     if (isGameRunningArg !== gameStore.isGameRunning) {
         gameStore.setIsGameRunning(isGameRunningArg);
         await runGameRunningChangedFlow(isGameRunningArg);
