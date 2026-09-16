@@ -94,11 +94,11 @@ describe('config sync', () => {
 
     it('falls back to the default when a row is deleted', async () => {
         const configRepository = fakeConfigRepository();
-        const stores = { advancedSettings: {}, generalSettings: { logEmptyAvatars: true }, vrcx: {} };
+        const stores = { advancedSettings: {}, generalSettings: { logResourceLoad: true }, vrcx: {} };
         const sync = createConfigSync({ stores, configRepository, setTimer: immediate });
 
-        sync.observe('DELETE FROM configs WHERE key = @key', new Map([['@key', transformKey('VRCX_logEmptyAvatars')]]));
-        await vi.waitFor(() => expect(stores.generalSettings.logEmptyAvatars).toBe(false));
+        sync.observe('DELETE FROM configs WHERE key = @key', new Map([['@key', transformKey('VRCX_logResourceLoad')]]));
+        await vi.waitFor(() => expect(stores.generalSettings.logResourceLoad).toBe(false));
     });
 
     it('runs the side effect a store init would', async () => {

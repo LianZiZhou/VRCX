@@ -142,10 +142,7 @@ export const useUpdateLoopStore = defineStore('UpdateLoop', () => {
                     // [hub] Skipped on the Hub: there is no local game, and
                     // vrInit() would push a shared feed every single second.
                     state.nextGameRunningCheck = 1;
-                    await runUpdateIsGameRunningFlow(
-                        await AppApi.IsGameRunning(),
-                        await AppApi.IsSteamVRRunning()
-                    );
+                    await runUpdateIsGameRunningFlow(await AppApi.IsGameRunning(), await AppApi.IsSteamVRRunning());
                     vrStore.vrInit(); // TODO: make this event based
                 }
                 if (--state.nextDatabaseOptimize <= 0) {

@@ -243,16 +243,16 @@ describe('hub end to end', () => {
 
     it('applies a setting a client changed without a restart', async () => {
         const client = await connectClient();
-        expect(hub.stores.generalSettings.logEmptyAvatars).toBe(false);
+        expect(hub.stores.generalSettings.logResourceLoad).toBe(false);
         // The dry-run SQLite stub answers every read with nothing, so the
         // sync re-reads the default; what matters is that the write was
         // noticed and the store touched.
-        hub.stores.generalSettings.logEmptyAvatars = true;
+        hub.stores.generalSettings.logResourceLoad = true;
         await client.call('SQLite', 'ExecuteNonQuery', [
             'INSERT OR REPLACE INTO configs (key, value) VALUES (@key, @value)',
-            { '@key': 'config:vrcx_logemptyavatars', '@value': 'false' }
+            { '@key': 'config:vrcx_logresourceload', '@value': 'false' }
         ]);
-        await vi.waitFor(() => expect(hub.stores.generalSettings.logEmptyAvatars).toBe(false));
+        await vi.waitFor(() => expect(hub.stores.generalSettings.logResourceLoad).toBe(false));
         expect(hub.configSync.stats.applied).toBeGreaterThanOrEqual(1);
     });
 

@@ -81,28 +81,27 @@ jobs:
           node-version: lts/*
           cache: npm
       - run: npm ci
-      # Both tools are given `-c` and invoked through node_modules/.bin rather
-      # than npx, so neither config nor binary resolution depends on the
-      # environment.
+      # Both tools are invoked through node_modules/.bin rather than npx, so
+      # binary resolution does not depend on the environment. Oxlint reads
+      # upstream's oxlint.config.mts, which since upstream dropped ESLint also
+      # carries the rules ESLint used to check.
       - name: Oxlint
         run: >-
-          ./node_modules/.bin/oxlint -c .oxlintrc.json
-          src/hub build-scripts/hub-archive.js build-scripts/package-hub.js
-      - name: ESLint
-        run: >-
-          ./node_modules/.bin/eslint src/hub vitest.hub.config.js src/vite.hub.config.js
+          ./node_modules/.bin/oxlint src/hub vitest.hub.config.js src/vite.hub.config.js
           build-scripts/build-hub.js build-scripts/hub-merge-offline.js
           build-scripts/hub-archive.js build-scripts/package-hub.js
       # Hub-owned paths only. Running the formatter over an upstream file
       # rewrites the whole thing -- which is exactly what the footprint test
-      # exists to catch -- so this must never widen to cover them.
+      # exists to catch -- so this must never widen to cover them. The config
+      # is the Hub's own: upstream's oxfmt.config.mts reflows JSDoc, which
+      # would rewrite the aligned comments throughout src/hub.
       - name: Format (Hub-owned files only)
         run: |
           paths="src/hub vitest.hub.config.js src/vite.hub.config.js
             build-scripts/build-hub.js build-scripts/hub-merge-offline.js
             build-scripts/hub-archive.js build-scripts/package-hub.js"
 
-          if ./node_modules/.bin/oxfmt --check -c .oxfmtrc.json $paths > fmt.log 2>&1; then
+          if ./node_modules/.bin/oxfmt --check -c src/hub/.oxfmtrc.json $paths > fmt.log 2>&1; then
             cat fmt.log
             exit 0
           fi
