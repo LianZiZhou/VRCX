@@ -530,6 +530,7 @@ each a small guarded block marked `// [hub]`:
 | `src/services/websocket.js`                | relay pipeline messages; mirrors do not connect; retry a failed token fetch                |
 | `src/stores/updateLoop.js`                 | gate timers by mode: no Discord on the Hub, no status change or cache eviction on a mirror |
 | `src/stores/vrcx.js`                       | Hub owns the schema; uplink Photon events before login too                                 |
+| `src/stores/vrcxUpdater.js`                | never auto-update to upstream's build, which would replace the fork                        |
 | `vitest.config.js`                         | exclude the Hub suite (it has its own config)                                              |
 | `package.json`                             | three scripts, four dev dependencies                                                       |
 
