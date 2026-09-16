@@ -51,6 +51,9 @@ const ALLOWANCE = {
     'src/services/websocket.js': 25,
     'src/stores/updateLoop.js': 60,
     'src/stores/vrcx.js': 44,
+    // Upstream's auto-update installs plain VRCX over the fork, which dropped
+    // mirror mode on a real client when upstream shipped v2026.09.16.
+    'src/stores/vrcxUpdater.js': 4,
     // The Socket Inspect window: one more Vite entry, one more tray item.
     'src/vite.config.js': 4,
     'Dotnet/Cef/MainForm.Designer.cs': 16,

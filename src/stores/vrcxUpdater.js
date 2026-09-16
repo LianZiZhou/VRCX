@@ -60,6 +60,9 @@ export const useVRCXUpdaterStore = defineStore('VRCXUpdater', () => {
         if (isMacOS.value) {
             noUpdater.value = true;
         }
+        // [hub] Upstream's updater would install plain VRCX over this fork and
+        // silently drop mirror mode; Hub clients are updated from Hub releases.
+        noUpdater.value = true;
 
         const [VRCX_autoUpdateVRCX, VRCX_id] = await Promise.all([
             configRepository.getString('VRCX_autoUpdateVRCX', 'Auto Download'),
