@@ -84,7 +84,10 @@ function findBaseRef() {
  * @returns {Map<string, number>} path -> changed lines
  */
 function changedLinesByFile(baseRef) {
-    const output = execFileSync('git', ['diff', '--numstat', baseRef, '--', '.'], {
+    // Line endings are not a change. Upstream commits some files with mixed
+    // CRLF/LF, and its .gitattributes (`eol=crlf`) makes a fresh checkout
+    // rewrite them all to CRLF, which without this counts them as ours.
+    const output = execFileSync('git', ['diff', '--numstat', '--ignore-cr-at-eol', baseRef, '--', '.'], {
         cwd: repoRoot,
         encoding: 'utf8'
     });
