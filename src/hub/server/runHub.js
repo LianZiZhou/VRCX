@@ -507,8 +507,7 @@ export async function runHub(options = {}) {
             effectiveSettings: {
                 gameLogDisabled: stores.advancedSettings?.gameLogDisabled ?? null,
                 autoStateChangeEnabled: stores.generalSettings?.autoStateChangeEnabled ?? null,
-                relaunchVRChatAfterCrash: stores.advancedSettings?.relaunchVRChatAfterCrash ?? null,
-                logEmptyAvatars: stores.generalSettings?.logEmptyAvatars ?? null
+                relaunchVRChatAfterCrash: stores.advancedSettings?.relaunchVRChatAfterCrash ?? null
             },
             stats: {
                 requests: coalesced.stats,

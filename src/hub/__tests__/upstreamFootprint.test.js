@@ -6,10 +6,10 @@
  * handful of small guarded blocks. Two things erode that quietly:
  *
  *   - reaching for an upstream file instead of adding a new one, and
- *   - running the formatter over an upstream file. The committed source is not
- *     formatted at the width `.oxfmtrc.json` configures, so `oxfmt` rewrites
- *     whole files and turns a three-line change into a two-hundred-line one.
- *     That has already happened once during this work.
+ *   - running the formatter over an upstream file. The Hub formats with its own
+ *     `src/hub/.oxfmtrc.json`, which does not match upstream's settings, so
+ *     `oxfmt` rewrites whole files and turns a three-line change into a
+ *     two-hundred-line one. That has already happened once during this work.
  *
  * This test fails when either does. If a change genuinely needs more room, move
  * the threshold deliberately rather than by accident.

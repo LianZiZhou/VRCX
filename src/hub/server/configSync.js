@@ -66,7 +66,6 @@ export const WATCHED_CONFIG_KEYS = [
     // settings/general.js
     watched('VRCX_udonExceptionLogging', 'generalSettings', 'udonExceptionLogging', 'bool', false),
     watched('VRCX_logResourceLoad', 'generalSettings', 'logResourceLoad', 'bool', false),
-    watched('VRCX_logEmptyAvatars', 'generalSettings', 'logEmptyAvatars', 'bool', false),
     watched('VRCX_localFavoriteFriendsGroups', 'generalSettings', 'localFavoriteFriendsGroups', 'json', '[]'),
     watched('VRCX_autoStateChangeEnabled', 'generalSettings', 'autoStateChangeEnabled', 'bool', false),
     watched('VRCX_autoStateChangeAloneStatus', 'generalSettings', 'autoStateChangeAloneStatus', 'string', 'join me'),
