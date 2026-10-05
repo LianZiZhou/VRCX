@@ -17,6 +17,7 @@ import { createNativeBridge, shutdownNativeBridge } from './nativeBridge.js';
 import { createSqliteGate } from './sqliteGate.js';
 import { createStatusServer } from './statusServer.js';
 import { logWebApiFailures } from './webApiLog.js';
+import { compactConsoleOutput, describeRejection } from './logFormat.js';
 import { diagnoseVrchatReachability } from './networkCheck.js';
 import { EventType } from '../shared/protocol.js';
 import { HubMode, setHubMode } from '../shared/mode.js';
@@ -122,6 +123,7 @@ export async function runHub(options = {}) {
 
     // --- staged import ----------------------------------------------------
     if (installSignalHandlers) {
+        compactConsoleOutput();
         // Node terminates the process on an unhandled rejection by default
         // (v15+). The data core fires plenty of un-awaited API calls from
         // background paths -- a pipeline event triggering a user lookup, say --
@@ -134,7 +136,7 @@ export async function runHub(options = {}) {
         // when that failed the second branch's rejection arrived before the
         // handler existed and killed the process.
         process.on('unhandledRejection', (reason) => {
-            log('Unhandled rejection (continuing)', reason);
+            log('Unhandled rejection (continuing)', describeRejection(reason));
         });
         // The desktop app runs in a browser, where a throw from a timer or an
         // event callback is logged and life goes on. Give the same code the
