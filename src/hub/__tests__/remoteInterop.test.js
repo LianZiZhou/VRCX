@@ -273,5 +273,26 @@ describe('remote interop', () => {
             expect(transport.sent).toHaveLength(0);
             expect(nativeWebApi.calls).toHaveLength(0);
         });
+
+        it('refuses an upload to VRChat rather than send it with a session it does not own', async () => {
+            // VRChat revokes a token used by a second client; uploading with a
+            // copy of the Hub's cookies signed the Hub out.
+            const localWebApi = createFakeNativeWebApi();
+            localWebApi.setResponse({ status: 200, message: '{}' });
+            const webApi = createRemoteWebApi(transport, localWebApi);
+
+            const refused = await webApi.Execute({
+                url: 'https://api.vrchat.cloud/api/1/file/image',
+                method: 'POST',
+                uploadImage: true
+            });
+            expect(refused.Item1).toBe(403);
+            expect(JSON.parse(refused.Item2).error.message).toMatch(/not available on a Hub mirror/);
+
+            // The pre-signed S3 PUT needs no session and still runs here.
+            await webApi.Execute({ url: 'https://s3.amazonaws.com/bucket/x', method: 'PUT', uploadFilePUT: true });
+            expect(localWebApi.calls).toHaveLength(1);
+            expect(transport.sent).toHaveLength(0);
+        });
     });
 });

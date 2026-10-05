@@ -316,6 +316,19 @@ describe('sign-in after a later sign-out', () => {
         expect(calls.relogin).toHaveLength(0);
     });
 
+    it('resumes the session a client signed in with instead of signing in again', async () => {
+        // The person answered the two-factor prompt on a mirror: the session
+        // is good, and a password sign-in now could ask for another code.
+        const { values } = fakeConfigs({});
+        const { stores, calls } = fakeStores([null, null]);
+        await start(stores);
+        signOut();
+        values.lastUserLoggedIn = 'usr_x';
+        await until(() => watchState.isLoggedIn);
+        expect(calls.relogin).toHaveLength(0);
+        expect(calls.autoLogin).toBe(2);
+    });
+
     it('runs one loop at a time across repeated sign-outs', async () => {
         const { stores, calls } = fakeStores([null], [null, null]);
         await start(stores);

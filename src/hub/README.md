@@ -205,7 +205,20 @@ attach afterwards find themselves already signed in.
 
 **Signing out from a mirror client signs out the Hub** and therefore every other
 client, and stops collection. If you only want to detach this machine, turn off
-`VRCX_HubEnabled` instead.
+`VRCX_HubEnabled` instead. That is the person's own "Log out" only: the sign-outs
+upstream does by itself (the friend list failing to load, `config` answering 403) report on the Hub's session, which the Hub repairs, so on a mirror they
+are skipped and the mirror reloads once the Hub answers `auth/user` again
+(`client/sessionGuard.js`).
+
+**The VRChat session never leaves the Hub.** VRChat revokes a session token
+that a second client uses: one avatar fetched from a Windows mirror with a
+copy of the Hub's cookies (the .NET `ImageCache` sends them to
+`api.vrchat.cloud`) signed the Hub out within thirty seconds, and the Hub's
+next sign-in asked for a two-factor code, which then popped up on the mirror.
+So the Hub no longer sends its cookies to clients, a mirror clears its own
+WebApi's cookies when it attaches, and an upload to VRChat from a mirror is
+refused (it used to run locally with that copy; the Hub cannot run uploads,
+see `client/remoteInterop.js`).
 
 ---
 
@@ -241,7 +254,7 @@ Pass `--tls-cert`/`--tls-key` to add TLS underneath if you want defence in
 depth.
 
 The call surface is a strict class+method allowlist: `SQLite.{Execute,
-ExecuteJson, ExecuteNonQuery}` and `WebApi.{Execute, ExecuteJson, GetCookies,
+ExecuteJson, ExecuteNonQuery, ExecuteInsert}` and `WebApi.{Execute, ExecuteJson, GetCookies,
 SetCookies, ClearCookies}`. Nothing else is reachable. (The in-process Electron
 bridge can construct any public class in the `VRCX` namespace by name; that is
 fine for same-process IPC and not fine for a network.)
@@ -313,10 +326,10 @@ endpoint) is routed through the Hub; third-party requests — the update check,
 avatar providers, image previews — run on the client. The account's automatic
 status change runs on the Hub only.
 
-**Offline fallback.** The Hub sends its VRChat cookies to each client as it
-attaches and broadcasts them as they change, so a client that loses the Hub
-can fall back to standalone without a fresh login and a 2FA prompt. A 401 on a
-mirror is left to the Hub to repair — the session is the Hub's — and the
+**Offline fallback.** A client that loses the Hub can fall back to standalone.
+It then signs in as a client of its own, with its own session, which may mean
+a two-factor prompt; borrowing the Hub's session would have revoked it. A 401
+on a mirror is left to the Hub to repair -- the session is the Hub's -- and the
 mirror re-fetches the user once the Hub says it is back. Switching modes
 reloads the window rather than swapping the database underneath a running app
 — the two databases hold different content and different per-user table
@@ -344,7 +357,12 @@ first to sign in a user the Hub has never seen). VRChat registry backups are
 per machine but keep their bookkeeping in the shared `configs` table, so with
 more than one mirror only one of them will back up. The primary password
 setting and a two-factor prompt both block the Hub's own sign-in; the Hub says
-so in its log and keeps retrying, and a client signing in wakes it.
+so in its log and keeps retrying, and a client signing in wakes it. The Hub
+then resumes the session that client left in its cookie jar rather than
+signing in with the password again, which could ask for another code. Every
+sign-in, two-factor verification and change to the cookie jar gets one log
+line saying who did it (the Hub or a named client) and how VRChat answered
+(`server/sessionAudit.js`), and every log line carries the local time.
 
 **Staying signed in.** Upstream's answer to a dead session is the login
 dialog: a 401 triggers an automatic re-login, and after three of those in an
