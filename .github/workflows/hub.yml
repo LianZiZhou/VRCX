@@ -62,19 +62,8 @@ jobs:
     name: Hub lint and format
     runs-on: ubuntu-latest
     steps:
-      # .editorconfig declares `end_of_line = crlf` for every file, and oxfmt
-      # honours it. Git stores the sources LF-normalised (`* text=auto`), so a
-      # default Linux checkout hands oxfmt LF files that it then rejects -- all
-      # of them, which is what made this look like a config problem rather than
-      # a line-ending one. Confirmed by taking a tree checked out as LF and
-      # adding .editorconfig to it: 46 of 46 files flip from passing to
-      # failing, and converting the same tree to CRLF flips them back.
-      #
-      # Checking out CRLF makes the runner match what the repo declares, and
-      # matches what a Windows checkout already produces, so CI and a
-      # developer's local run agree about what "formatted" means.
-      - name: Match the line endings .editorconfig asks for
-        run: git config --global core.autocrlf true
+      # oxfmt follows .editorconfig, which since upstream f43e323a says LF,
+      # as does .gitattributes, so a default checkout already matches.
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
