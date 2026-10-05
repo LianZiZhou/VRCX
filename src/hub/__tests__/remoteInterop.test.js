@@ -34,6 +34,10 @@ function createFakeNativeSQLite() {
         async ExecuteNonQuery(sql, args) {
             calls.push({ method: 'ExecuteNonQuery', sql, args });
             return 1;
+        },
+        async ExecuteInsert(sql, args) {
+            calls.push({ method: 'ExecuteInsert', sql, args });
+            return 4321;
         }
     };
 }
@@ -130,6 +134,19 @@ describe('remote interop', () => {
             expect(call.method).toBe('ExecuteNonQuery');
             expect(call.args).toBeInstanceOf(Map);
             expect(call.args.get('@name')).toBe('alice');
+        });
+
+        it('returns the rowid of an insert from the Hub', async () => {
+            // Since upstream 58033a22 the feed and game log inserts go through
+            // executeInsert and only show an entry the database accepted.
+            globalThis.SQLite = createRemoteSQLite(transport);
+            const { SQLiteService } = await import('../../services/sqlite.js');
+            const service = new SQLiteService();
+
+            await expect(service.executeInsert('INSERT INTO t VALUES (@name)', { '@name': 'bob' })).resolves.toBe(4321);
+            const call = nativeSQLite.calls.at(-1);
+            expect(call.method).toBe('ExecuteInsert');
+            expect(call.args.get('@name')).toBe('bob');
         });
     });
 

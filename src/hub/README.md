@@ -99,9 +99,10 @@ at the bundled copy.
 
 One machine cross-builds all six platforms, so `package-hub.js` verifies what
 it cannot run: the right native SQLite for the RID (and its architecture, read
-from the file header -- the arm64 zips are published from
-`VRCX-Electron-arm64.csproj`, whose System.Data.SQLite has an arm64 native
-library; the x64 project's does not), the generated interop shim,
+from the file header -- System.Data.SQLite 1.0.119 has no arm64 native library,
+so the arm64 zips are published with 2.0.3; upstream's csproj does that for
+linux-arm64 and `build-scripts/hub-sqlite-arm64.targets` for win-arm64 and
+osx-arm64), the generated interop shim,
 the other five platforms' native hosts pruned, the bundled Node's ELF/Mach-O/PE
 header matching the target architecture, and -- by reading the finished zip
 back -- `start-hub.sh` keeping its executable bit.
@@ -121,8 +122,9 @@ while this lives only on `hub` the tag is the way in.
 
 - Node 24+
 - The .NET 10 runtime
-- VRCX's .NET assemblies built for the target: `dotnet publish
-Dotnet/VRCX-Electron-arm64.csproj -c Release`, giving `build/Electron/`
+- VRCX's .NET assemblies built for the target: `dotnet build
+Dotnet/VRCX-Electron.csproj -c Release -p:Platform=ARM64 -r linux-arm64`,
+  giving `build/Electron/linux-arm64/`
 
 ### Build and run
 
@@ -183,7 +185,18 @@ console.
 **Upgrade the Hub first.** The wire protocol is versioned and a mismatched
 pair is refused outright, and a refused mirror falls back to standalone and
 starts writing to its own local database. So: close the mirror, replace and
-start the Hub, then update and start the mirror.
+start the Hub, then update and start the mirror. The same holds for the
+database schema, which the Hub migrates on its first start after an upgrade
+(17 to 18 with upstream's bio diff); back up `VRCX.sqlite3` first.
+
+Unpack a new Hub zip into a fresh directory rather than over the old one:
+`dotnet/` must hold only that release's assemblies, and since upstream dropped
+`VRCX-Electron-arm64.csproj` an old `VRCX-Electron-arm64.cjs` left beside the
+new files would be dead weight at best.
+
+**Clients do not update themselves.** Upstream's updater would install plain
+VRCX over the fork, which drops mirror mode, so a Hub client never checks for
+updates. Install the `Cef-Setup` artifact from the Hub release run instead.
 
 **Signing in is done from a client.** The Hub has no login UI on purpose. Attach
 a client, sign in as usual (the request travels to the Hub, whose cookie jar it

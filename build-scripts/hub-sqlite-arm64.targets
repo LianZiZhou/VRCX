@@ -1,0 +1,17 @@
+<!--
+  [hub] System.Data.SQLite for the arm64 Hub zips upstream does not build.
+
+  Dotnet/VRCX-Electron.csproj uses System.Data.SQLite 2.0.3 (SourceGear's
+  e_sqlite3, which has arm64 natives) only for linux-arm64, and 1.0.119
+  everywhere else. 1.0.119 ships SQLite.Interop for linux-x64, osx-x64, win-x64
+  and win-x86 alone, so a win-arm64 or osx-arm64 Hub would start and then fail
+  on its first query. package-hub.js passes this file as
+  CustomAfterMicrosoftCommonTargets, which MSBuild imports after the project's
+  own items, so the swap needs no change to the upstream csproj.
+-->
+<Project>
+  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'win-arm64' Or '$(RuntimeIdentifier)' == 'osx-arm64'">
+    <PackageReference Remove="System.Data.SQLite" />
+    <PackageReference Include="System.Data.SQLite" Version="2.0.3" />
+  </ItemGroup>
+</Project>

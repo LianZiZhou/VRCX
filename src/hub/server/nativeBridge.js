@@ -84,24 +84,21 @@ export function configureDotnetSwitches(env = process.env, platform = process.pl
 /**
  * Where the generated node-api-dotnet shim may live, in order of preference.
  *
- * `dotnet/` is the layout inside a release zip; `build/Electron/` is where a
- * `dotnet build` in a checkout puts it. Both are searched so the same bundle
- * runs from a release and from the repo without being told which it is.
+ * `dotnet/` is the layout inside a release zip; `build/Electron/<rid>/` is
+ * where a `dotnet build` in a checkout puts it (plain `build/Electron/` before
+ * upstream added the RID). All are searched so the same bundle runs from a
+ * release and from the repo without being told which it is.
  *
  * @param {string} rootDir
  * @returns {string[]}
  */
 function assemblyCandidates(rootDir) {
-    const dirs = ['dotnet', 'build/Electron'];
-    const names =
-        // The arm64 csproj emits a differently named shim, and on arm64 it is
-        // the only one that works: the plain csproj's System.Data.SQLite has
-        // no arm64 native library (package-hub.js explains). The fallback is
-        // kept for a checkout that built the plain project by hand, where the
-        // error message from SQLite is at least immediate and clear.
-        process.arch === 'arm64' ? ['VRCX-Electron-arm64.cjs', 'VRCX-Electron.cjs'] : ['VRCX-Electron.cjs'];
-
-    return dirs.flatMap((dir) => names.map((name) => join(rootDir, dir, name)));
+    const os = { win32: 'win', darwin: 'osx' }[process.platform] ?? process.platform;
+    const dirs = ['dotnet', `build/Electron/${os}-${process.arch}`, 'build/Electron'];
+    // Upstream dropped VRCX-Electron-arm64.csproj; one project, one shim name,
+    // for every RID. A `dotnet/` left over from an older zip may still hold
+    // VRCX-Electron-arm64.cjs, which is deliberately not looked for.
+    return dirs.map((dir) => join(rootDir, dir, 'VRCX-Electron.cjs'));
 }
 
 /**

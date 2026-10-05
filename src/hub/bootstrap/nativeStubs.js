@@ -37,7 +37,8 @@ export function installNativeStubs() {
         Exit: noopAsync,
         Execute: async () => [],
         ExecuteJson: async () => '[]',
-        ExecuteNonQuery: async () => 0
+        ExecuteNonQuery: async () => 0,
+        ExecuteInsert: async () => 0
     });
 
     // 503 rather than 200: a stubbed Hub genuinely has no network, and every

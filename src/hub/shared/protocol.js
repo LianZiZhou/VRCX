@@ -133,7 +133,7 @@ export const RejectReason = {
  * must stay local on every client.
  */
 export const CALL_ALLOWLIST = Object.freeze({
-    SQLite: Object.freeze(['Execute', 'ExecuteJson', 'ExecuteNonQuery']),
+    SQLite: Object.freeze(['Execute', 'ExecuteJson', 'ExecuteNonQuery', 'ExecuteInsert']),
     WebApi: Object.freeze(['Execute', 'ExecuteJson', 'GetCookies', 'SetCookies', 'ClearCookies'])
 });
 

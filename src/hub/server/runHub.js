@@ -219,7 +219,7 @@ export async function runHub(options = {}) {
         if (config.verbose) {
             log(`call ${className}.${method} from ${client?.clientName ?? '?'}`);
         }
-        if (className === 'SQLite' && method === 'ExecuteNonQuery') {
+        if (className === 'SQLite' && (method === 'ExecuteNonQuery' || method === 'ExecuteInsert')) {
             configSync.observe(args?.[0], args?.[1] ?? null);
         }
         return coalesced(className, method, args, client);

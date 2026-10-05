@@ -51,8 +51,8 @@ COPY --from=build /src/build/hub ./
 RUN npm install --omit=dev --engine-strict=false --no-audit --no-fund
 
 # The compiled VRCX .NET assemblies. Built separately with
-#   dotnet publish Dotnet/VRCX-Electron-arm64.csproj -c Release
-# and expected at build/Electron/ relative to the working directory.
+#   dotnet build Dotnet/VRCX-Electron.csproj -c Release -p:Platform=ARM64 -r linux-arm64
+# and expected at build/Electron/<rid>/ relative to the working directory.
 COPY build/Electron ./build/Electron
 
 ENV VRCX_HUB_DATA=/data

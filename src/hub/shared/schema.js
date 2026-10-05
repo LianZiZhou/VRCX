@@ -11,4 +11,4 @@
  * the two.
  */
 
-export const EXPECTED_DATABASE_VERSION = 17;
+export const EXPECTED_DATABASE_VERSION = 18;

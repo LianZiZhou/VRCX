@@ -21,7 +21,12 @@
  */
 
 import { isMirrorMode } from '../shared/mode.js';
-import { isSuppressedOnMirror, mirrorSuppressedMethods } from '../shared/derivedWrites.js';
+import {
+    isSuppressedOnMirror,
+    mirrorSuppressedMethods,
+    PERSISTED_ENTRIES_WRITES,
+    PERSISTED_ENTRY_WRITES
+} from '../shared/derivedWrites.js';
 
 /**
  * `begin`/`commit` issue bare BEGIN/COMMIT on the shared connection. They have
@@ -45,6 +50,44 @@ export const suppressionStats = {
 function record(method) {
     suppressionStats.total++;
     suppressionStats.byMethod.set(method, (suppressionStats.byMethod.get(method) ?? 0) + 1);
+}
+
+/**
+ * Synthetic rowIds for entries a mirror did not write. Far above any real
+ * SQLite rowid, so they never collide with a row loaded from the Hub's DB and
+ * sort as the newest for a given timestamp.
+ */
+const SYNTHETIC_ROWID_BASE = 2 ** 50;
+let syntheticRowIds = 0;
+
+/**
+ * @param {any} entry
+ * @returns {any} the entry as the insert would have returned it
+ */
+function asPersisted(entry) {
+    if (!entry || typeof entry !== 'object') {
+        return undefined;
+    }
+    syntheticRowIds++;
+    return { ...entry, rowId: SYNTHETIC_ROWID_BASE + syntheticRowIds };
+}
+
+/**
+ * What a suppressed call resolves to: what a successful write would have, for
+ * the inserts whose callers act on the result, and undefined otherwise.
+ *
+ * @param {string} method
+ * @param {any[]} args
+ * @returns {any}
+ */
+function suppressedResult(method, args) {
+    if (PERSISTED_ENTRY_WRITES.has(method)) {
+        return asPersisted(args[0]);
+    }
+    if (PERSISTED_ENTRIES_WRITES.has(method)) {
+        return Array.isArray(args[0]) ? args[0].map(asPersisted).filter(Boolean) : [];
+    }
+    return undefined;
 }
 
 /**
@@ -73,7 +116,7 @@ export function guardDatabase(database) {
                 record(prop);
                 // Callers `await` these; resolve rather than returning
                 // undefined so a mirror client behaves like a fast success.
-                return Promise.resolve(undefined);
+                return Promise.resolve(suppressedResult(prop, args));
             };
         }
     });
