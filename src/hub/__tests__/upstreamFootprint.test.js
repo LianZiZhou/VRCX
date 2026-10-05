@@ -121,6 +121,7 @@ function isHubOwned(path) {
         path === 'build-scripts/hub-merge-offline.js' ||
         path === 'build-scripts/hub-archive.js' ||
         path === 'build-scripts/package-hub.js' ||
+        path === 'build-scripts/hub-sqlite-arm64.targets' ||
         // A new workflow file cannot conflict with upstream, so it counts as
         // ours even though it lives in an upstream directory.
         path === '.github/workflows/hub.yml' ||

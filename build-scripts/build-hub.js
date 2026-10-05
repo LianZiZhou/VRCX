@@ -13,8 +13,9 @@
  * internals dynamically).
  *
  * The .NET assemblies themselves are built separately, by
- * `dotnet publish Dotnet/VRCX-Electron-arm64.csproj`, and are expected at
- * `build/Electron/` relative to wherever the Hub is run from.
+ * `dotnet build Dotnet/VRCX-Electron.csproj -p:Platform=ARM64 -r linux-arm64`,
+ * and are expected at `build/Electron/<rid>/` relative to wherever the Hub is
+ * run from.
  */
 
 const { execFileSync } = require('node:child_process');

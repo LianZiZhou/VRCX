@@ -72,9 +72,46 @@ export const DERIVED_WRITES = Object.freeze(
         // addAvatarTimeSpent is `SET time = time + @x`, a read-modify-write in
         // SQL: if both the Hub and a client ran it the counter would double.
         'addAvatarToHistory',
-        'addAvatarTimeSpent'
+        'addAvatarTimeSpent',
+
+        // services/database/userProfile.js — the cache the bio diff compares
+        // against (userCoordinator.js). A mirror runs the same comparison on
+        // every relayed user update and whenever someone opens a profile; had
+        // it updated the cache, the Hub would compare against the new bio,
+        // find nothing changed, and never write the feed row only it writes.
+        'setUserProfile'
     ])
 );
+
+/**
+ * Derived inserts that resolve to the persisted entry, `{ ...entry, rowId }`,
+ * or to nothing when no row was written. Callers only show an entry once it is
+ * persisted (upstream 58033a22), so answering a suppressed call with undefined
+ * would leave a mirror's feed and game log tables frozen until a reload.
+ *
+ * A mirror therefore gets its entry back with a synthetic rowId. The Hub wrote
+ * the real row; the tables key and sort on rowId, so the synthetic ones are
+ * unique and newer than any real row, and a reload replaces them.
+ */
+export const PERSISTED_ENTRY_WRITES = Object.freeze(
+    new Set([
+        'addGPSToDatabase',
+        'addStatusToDatabase',
+        'addBioToDatabase',
+        'addAvatarToDatabase',
+        'addOnlineOfflineToDatabase',
+        'addGamelogLocationToDatabase',
+        'addGamelogJoinLeaveToDatabase',
+        'addGamelogPortalSpawnToDatabase',
+        'addGamelogVideoPlayToDatabase',
+        'addGamelogResourceLoadToDatabase',
+        'addGamelogEventToDatabase',
+        'addGamelogExternalToDatabase'
+    ])
+);
+
+/** As above, for inserts that take and return an array of entries. */
+export const PERSISTED_ENTRIES_WRITES = Object.freeze(new Set(['addGamelogJoinLeaveBulk']));
 
 /**
  * Friend-log history types written by a person, from the user dialog's

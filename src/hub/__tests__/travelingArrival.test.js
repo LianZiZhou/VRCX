@@ -92,6 +92,10 @@ describe('GPS for the first stop after coming online', () => {
 
     beforeAll(async () => {
         ({ app, stores } = await startHubCore());
+        // The feed only shows entries the database accepted (upstream
+        // 58033a22); the stub's "nothing inserted" would hide every one.
+        let rowId = 0;
+        globalThis.SQLite.ExecuteInsert = async () => ++rowId;
         // A feed entry with a location makes the stores fetch the world and
         // the instance, fire-and-forget. The default stub answers 503, which
         // the Hub logs as an unhandled rejection and vitest fails on; answer

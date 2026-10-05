@@ -68,6 +68,9 @@ export function createInteropHandler(natives, options = {}) {
             case 'SQLite.ExecuteNonQuery':
                 return sqliteForClient(client).ExecuteNonQuery(args[0], argsFromWire(args[1] ?? null));
 
+            case 'SQLite.ExecuteInsert':
+                return sqliteForClient(client).ExecuteInsert(args[0], argsFromWire(args[1] ?? null));
+
             case 'WebApi.Execute':
                 return httpExecute(args[0]);
 

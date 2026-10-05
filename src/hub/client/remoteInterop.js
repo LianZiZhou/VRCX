@@ -7,6 +7,7 @@
  *
  *   SQLite.Execute(sql, argsObject)      -> any[][]            (CefSharp)
  *   SQLite.ExecuteJson(sql, argsMap)     -> JSON string        (Electron)
+ *   SQLite.ExecuteInsert(sql, args)      -> rowid, 0 if none   (both)
  *   WebApi.Execute(optionsObject)        -> {Item1, Item2}     (CefSharp)
  *   WebApi.ExecuteJson(optionsJson)      -> JSON string        (Electron)
  *
@@ -123,6 +124,15 @@ export function createRemoteSQLite(transport) {
          */
         async ExecuteNonQuery(sql, args = null) {
             return transport.call('SQLite', 'ExecuteNonQuery', [sql, argsToWire(args)]);
+        },
+
+        /**
+         * @param {string} sql
+         * @param {Map<string, any> | Record<string, any> | null} [args]
+         * @returns {Promise<number>} the new row's rowid, or 0 if none was inserted
+         */
+        async ExecuteInsert(sql, args = null) {
+            return Number(await transport.call('SQLite', 'ExecuteInsert', [sql, argsToWire(args)]));
         }
     };
 }

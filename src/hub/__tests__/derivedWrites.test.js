@@ -15,6 +15,8 @@ import {
     DERIVED_WRITES,
     isSuppressedOnMirror,
     mirrorSuppressedMethods,
+    PERSISTED_ENTRIES_WRITES,
+    PERSISTED_ENTRY_WRITES,
     SCHEMA_WRITES
 } from '../shared/derivedWrites.js';
 import { getHubMode, HubMode, setHubMode } from '../shared/mode.js';
@@ -80,6 +82,28 @@ describe('derived write list', () => {
         // Photon-derived: only stores/photon.js writes these, and Photon
         // reaches the Hub through the client uplink.
         expect(DERIVED_WRITES.has('setModeration')).toBe(true);
+        // The bio diff's cache: only the Hub may move it, or the Hub would
+        // compare against a bio a mirror already stored and miss the change.
+        expect(DERIVED_WRITES.has('setUserProfile')).toBe(true);
+        expect(mirrorSuppressedMethods().has('getUserProfile')).toBe(false);
+    });
+
+    it('knows which suppressed inserts their callers expect an entry back from', () => {
+        for (const name of [...PERSISTED_ENTRY_WRITES, ...PERSISTED_ENTRIES_WRITES]) {
+            expect(DERIVED_WRITES.has(name), `${name} is answered with an entry, so it must be suppressed`).toBe(true);
+        }
+        // Tripwire for an upstream change of shape: these resolve to
+        // `{ ...entry, rowId }` today, which is what the guard imitates.
+        for (const name of PERSISTED_ENTRY_WRITES) {
+            expect(database[name].toString(), `${name} no longer returns { ...entry, rowId }`).toMatch(
+                /return rowId \? \{ \.\.\.entry, rowId \} : undefined/
+            );
+        }
+        // And every insert that does return one is listed.
+        const returningEntries = Object.keys(database).filter(
+            (name) => typeof database[name] === 'function' && /\{ \.\.\.entry, rowId \}/.test(database[name].toString())
+        );
+        expect(returningEntries.filter((name) => !PERSISTED_ENTRY_WRITES.has(name))).toEqual([]);
     });
 
     it('tells a friend request the user sent from a friendship the pipeline reported', () => {
@@ -154,11 +178,36 @@ describe('database guard', () => {
         const guarded = guardDatabase(fake);
         setHubMode(HubMode.MIRROR);
 
-        await expect(guarded.addGPSToDatabase({ id: 1 })).resolves.toBeUndefined();
+        await expect(guarded.addGPSToDatabase({ id: 1 })).resolves.toMatchObject({ id: 1 });
         await expect(guarded.setUserMemo('hi')).resolves.toBe('wrote-memo');
 
         expect(fake.calls).toEqual([['setUserMemo', 'hi']]);
         expect(suppressionStats.byMethod.get('addGPSToDatabase')).toBe(1);
+    });
+
+    it('answers a suppressed insert as if it had been written', async () => {
+        const guarded = guardDatabase({
+            async addGPSToDatabase() {
+                throw new Error('must not run on a mirror');
+            },
+            async addGamelogJoinLeaveBulk() {
+                throw new Error('must not run on a mirror');
+            }
+        });
+        setHubMode(HubMode.MIRROR);
+
+        // The feed only shows what the insert hands back, keyed on rowId.
+        const first = await guarded.addGPSToDatabase({ userId: 'usr_a', type: 'GPS' });
+        const second = await guarded.addGPSToDatabase({ userId: 'usr_b', type: 'GPS' });
+        expect(first).toMatchObject({ userId: 'usr_a', type: 'GPS' });
+        expect(typeof first.rowId).toBe('number');
+        expect(second.rowId).toBeGreaterThan(first.rowId);
+        expect(first.rowId).toBeGreaterThan(2 ** 40);
+
+        const bulk = await guarded.addGamelogJoinLeaveBulk([{ displayName: 'A' }, { displayName: 'B' }]);
+        expect(bulk.map((entry) => entry.displayName)).toEqual(['A', 'B']);
+        expect(new Set(bulk.map((entry) => entry.rowId)).size).toBe(2);
+        await expect(guarded.addGamelogJoinLeaveBulk([])).resolves.toEqual([]);
     });
 
     it('decides conditional writes on their arguments', async () => {

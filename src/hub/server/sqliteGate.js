@@ -23,7 +23,7 @@
 /** A lease older than this is rolled back and released. */
 export const DEFAULT_LEASE_TIMEOUT_MS = 30000;
 
-const GATED_METHODS = new Set(['Execute', 'ExecuteJson', 'ExecuteNonQuery']);
+const GATED_METHODS = new Set(['Execute', 'ExecuteJson', 'ExecuteNonQuery', 'ExecuteInsert']);
 
 /**
  * @param {string} sql
@@ -152,6 +152,11 @@ export function createSqliteGate(native, options = {}) {
                 {},
                 {
                     get(_, prop) {
+                        if (prop === 'ExecuteInsert') {
+                            // A C# long, which the bridge may hand over as a
+                            // BigInt; callers compare rowIds as numbers.
+                            return async (...args) => Number(await run(owner, prop, args));
+                        }
                         if (typeof prop === 'string' && GATED_METHODS.has(prop)) {
                             return (...args) => run(owner, prop, args);
                         }

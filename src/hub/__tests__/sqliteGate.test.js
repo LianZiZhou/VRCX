@@ -20,6 +20,11 @@ function createFakeNative() {
             statements.push(sql);
             return 1;
         },
+        async ExecuteInsert(sql) {
+            statements.push(sql);
+            // A C# long, as node-api-dotnet may deliver it.
+            return 7n;
+        },
         Init() {
             return 'init';
         },
@@ -61,6 +66,21 @@ describe('sqlite gate', () => {
         await Promise.all([a.ExecuteJson('SELECT 1'), b.ExecuteNonQuery('INSERT 1'), a.ExecuteJson('SELECT 2')]);
         expect(native.statements).toEqual(['SELECT 1', 'INSERT 1', 'SELECT 2']);
         expect(gate.stats.waits).toBe(0);
+    });
+
+    it('holds inserts during a transaction too, and returns their rowid as a number', async () => {
+        const native = createFakeNative();
+        const gate = createSqliteGate(native);
+        const a = gate.forOwner('a');
+        const hub = gate.forOwner('hub');
+
+        await a.ExecuteNonQuery('BEGIN');
+        const insert = hub.ExecuteInsert('INSERT INTO feed VALUES (1)');
+        await settle();
+        expect(native.statements).toEqual(['BEGIN']);
+        await a.ExecuteNonQuery('COMMIT');
+        await expect(insert).resolves.toBe(7);
+        expect(native.statements).toEqual(['BEGIN', 'COMMIT', 'INSERT INTO feed VALUES (1)']);
     });
 
     it("holds everyone else's statements until the transaction ends", async () => {

@@ -71,33 +71,34 @@ const PLATFORMS = {
 };
 
 /**
- * Upstream keeps two Electron csproj files that differ in one thing that
- * matters here: the SQLite binding. `VRCX-Electron.csproj` pins
- * System.Data.SQLite 1.0.119, whose native `SQLite.Interop.dll` exists only
- * for x64 (and win-x86). `VRCX-Electron-arm64.csproj` uses 2.0.3, which binds
- * to SourceGear's `e_sqlite3` and so runs on arm64. Publishing the x64 project
- * for an arm64 RID builds without complaint and then fails on the Pi with
- * "Unable to load shared library 'SQLite.Interop.dll'" -- which is how this
- * table came to exist.
+ * One project builds every RID, but the SQLite binding still differs by
+ * architecture, and that is the one thing that matters here. System.Data.SQLite
+ * 1.0.119's native `SQLite.Interop.dll` exists only for x64 (and win-x86);
+ * 2.0.3 binds to SourceGear's `e_sqlite3` and so runs on arm64. Publishing
+ * 1.0.119 for an arm64 RID builds without complaint and then fails on the Pi
+ * with "Unable to load shared library 'SQLite.Interop.dll'" -- which is how
+ * this table came to exist.
  *
- * The generated node-api-dotnet shim is named after the project, which is why
- * `server/nativeBridge.js` looks for `VRCX-Electron-arm64.cjs` first on arm64.
+ * Upstream's `VRCX-Electron.csproj` picks 2.0.3 for linux-arm64 only;
+ * `hub-sqlite-arm64.targets` extends that to win-arm64 and osx-arm64, which
+ * upstream does not build but the Hub ships.
  *
  * @param {string} platform
- * @returns {{ csproj: string, assembly: string, sqlite: string }}
+ * @returns {{ csproj: string, assembly: string, sqlite: string, msbuildPlatform: string }}
  */
 function dotnetProjectFor(platform) {
     const { arm64, windows } = PLATFORMS[platform];
+    const project = { csproj: 'VRCX-Electron.csproj', assembly: 'VRCX-Electron' };
     if (arm64) {
         const sqlite = windows
             ? 'e_sqlite3.dll'
             : platform.startsWith('osx')
               ? 'libe_sqlite3.dylib'
               : 'libe_sqlite3.so';
-        return { csproj: 'VRCX-Electron-arm64.csproj', assembly: 'VRCX-Electron-arm64', sqlite };
+        return { ...project, sqlite, msbuildPlatform: 'ARM64' };
     }
     // 1.0.119 names its native library the same on every OS.
-    return { csproj: 'VRCX-Electron.csproj', assembly: 'VRCX-Electron', sqlite: 'SQLite.Interop.dll' };
+    return { ...project, sqlite: 'SQLite.Interop.dll', msbuildPlatform: 'x64' };
 }
 
 const VARIANTS = ['full', 'slim'];
@@ -291,25 +292,28 @@ async function resolveNode(requested) {
  * MSBuild's own paths are left alone. Redirecting BaseIntermediateOutputPath
  * under the project directory makes the SDK glob the NodeApi source
  * generator's output back in as ordinary sources, and the build fails on
- * duplicate definitions. Sharing the default obj/ across RIDs is fine -- it
- * keys on the RID, verified by publishing win-x64 and linux-arm64 back to back
- * and confirming each output carries only its own native SQLite.
- *
- * One side effect: `dotnet publish` also refreshes the csproj's own OutputPath,
- * `build/Electron/`, so after packaging that directory holds whichever RID was
- * built last.
+ * duplicate definitions. The same happens with intermediates from before
+ * upstream moved them to `Dotnet/obj/<project>/`: a checkout that still has
+ * `Dotnet/obj1/` or `Dotnet/obj/Release/` fails with CS0101 until
+ * `build-scripts/clean.ps1` removes them. Sharing obj/ across RIDs is fine --
+ * it keys on the RID, verified by publishing all six back to back and
+ * confirming each output carries only its own native SQLite.
  *
  * @param {string} platform
  * @param {string} destDir
  */
 function publishDotnet(platform, destDir) {
+    const project = dotnetProjectFor(platform);
     execFileSync(
         'dotnet',
         [
             'publish',
-            join(rootDir, 'Dotnet', dotnetProjectFor(platform).csproj),
+            join(rootDir, 'Dotnet', project.csproj),
             '-r',
             platform,
+            // Dotnet/Directory.Build.props refuses AnyCPU.
+            `-p:Platform=${project.msbuildPlatform}`,
+            `-p:CustomAfterMicrosoftCommonTargets=${join(__dirname, 'hub-sqlite-arm64.targets')}`,
             // `--self-contained false` is parsed as a flag plus a stray project
             // argument by the CLI; the MSBuild property form is unambiguous.
             '-p:SelfContained=false',
@@ -326,7 +330,7 @@ function publishDotnet(platform, destDir) {
         { cwd: rootDir, stdio: ['ignore', 'ignore', 'inherit'] }
     );
 
-    const shim = `${dotnetProjectFor(platform).assembly}.cjs`;
+    const shim = `${project.assembly}.cjs`;
     if (!existsSync(join(destDir, shim))) {
         throw new Error(`${platform}: publish produced no ${shim}`);
     }
