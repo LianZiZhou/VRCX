@@ -6,6 +6,8 @@
  * module dynamically rather than statically.
  */
 
+import { createHash } from 'node:crypto';
+
 import { watch } from 'vue';
 
 import { createHubServer } from './wsServer.js';
@@ -17,7 +19,8 @@ import { createNativeBridge, shutdownNativeBridge } from './nativeBridge.js';
 import { createSqliteGate } from './sqliteGate.js';
 import { createStatusServer } from './statusServer.js';
 import { logWebApiFailures } from './webApiLog.js';
-import { compactConsoleOutput, describeRejection } from './logFormat.js';
+import { compactConsoleOutput, describeRejection, stampConsoleOutput } from './logFormat.js';
+import { auditSessionChanges, sessionCaller } from './sessionAudit.js';
 import { diagnoseVrchatReachability } from './networkCheck.js';
 import { EventType } from '../shared/protocol.js';
 import { HubMode, setHubMode } from '../shared/mode.js';
@@ -117,13 +120,17 @@ export async function runHub(options = {}) {
         }
     };
 
+    if (installSignalHandlers) {
+        // Before the first line, so every line has a time.
+        compactConsoleOutput();
+        stampConsoleOutput();
+    }
     log(`Starting ${HUB_VERSION}`);
     log(`Node ${process.versions.node} on ${process.platform}-${process.arch}`);
     log(`Data directory: ${config.configDir}`);
 
     // --- staged import ----------------------------------------------------
     if (installSignalHandlers) {
-        compactConsoleOutput();
         // Node terminates the process on an unhandled rejection by default
         // (v15+). The data core fires plenty of un-awaited API calls from
         // background paths -- a pipeline event triggering a user lookup, say --
@@ -174,6 +181,9 @@ export async function runHub(options = {}) {
         // The one place the .NET side's HTTP failure reason can still be read
         // before upstream code reduces it to `{}`.
         natives.WebApi = logWebApiFailures(natives.WebApi, { log });
+        // Who signed in, verified a second factor or touched the cookie jar,
+        // and what VRChat said.
+        natives.WebApi = auditSessionChanges(natives.WebApi, { log });
     }
 
     // One connection, many writers: the Hub's own statements and every
@@ -224,7 +234,7 @@ export async function runHub(options = {}) {
         if (className === 'SQLite' && (method === 'ExecuteNonQuery' || method === 'ExecuteInsert')) {
             configSync.observe(args?.[0], args?.[1] ?? null);
         }
-        return coalesced(className, method, args, client);
+        return sessionCaller.run(client?.clientName ?? 'a client', () => coalesced(className, method, args, client));
     };
 
     /**
@@ -309,24 +319,28 @@ export async function runHub(options = {}) {
         broadcastHubState();
     }
 
-    // --- session mirroring ------------------------------------------------
-    // Clients keep a local copy of the Hub's VRChat cookies so that when the
-    // Hub goes away they can fall back to standalone without a fresh login and
-    // a 2FA prompt. Sent to each client as it attaches, and broadcast on
-    // change: the cookie jar only moves on login, logout and token refresh.
+    // --- session state ----------------------------------------------------
+    // Who the Hub is signed in as, sent to each client as it attaches and
+    // broadcast on change, so a mirror can re-fetch the user once the Hub has
+    // signed back in. The cookies themselves stay here: clients once kept a
+    // copy for the offline fallback, but VRChat revokes a session token that
+    // a second client uses, and theirs was used for every notification
+    // avatar. The fingerprint still follows the jar, by hash.
     let lastSessionFingerprint = null;
 
     /** @returns {Promise<{ fingerprint: string, session: object }>} */
     async function currentSession() {
         const cookies = await natives.WebApi.GetCookies();
         const userId = stores.user.currentUser?.id ?? null;
+        const jar = createHash('sha256')
+            .update(String(cookies ?? ''))
+            .digest('hex');
         return {
-            fingerprint: `${watchState.isLoggedIn}:${userId}:${cookies?.length ?? 0}:${cookies ?? ''}`,
+            fingerprint: `${watchState.isLoggedIn}:${userId}:${jar}`,
             session: {
                 loggedIn: watchState.isLoggedIn,
                 userId,
-                displayName: stores.user.currentUser?.displayName ?? null,
-                cookies
+                displayName: stores.user.currentUser?.displayName ?? null
             }
         };
     }

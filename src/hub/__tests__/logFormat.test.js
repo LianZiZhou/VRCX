@@ -35,3 +35,15 @@ describe('Hub log format', () => {
         expect(describeRejection(undefined)).toBeUndefined();
     });
 });
+
+describe('Hub log timestamps', () => {
+    it('prefixes every console line with the local time', async () => {
+        const { formatTimestamp, stampConsoleOutput } = await import('../server/logFormat.js');
+        const lines = [];
+        const target = { log: (line) => lines.push(line), info() {}, warn() {}, error() {}, debug() {} };
+        stampConsoleOutput(target, () => new Date(2026, 9, 5, 21, 43, 7));
+        target.log('[hub] Signed in.', { id: 1 });
+        expect(lines).toEqual(['2026-10-05 21:43:07 [hub] Signed in. { id: 1 }']);
+        expect(formatTimestamp(new Date(2026, 0, 2, 3, 4, 5))).toBe('2026-01-02 03:04:05');
+    });
+});

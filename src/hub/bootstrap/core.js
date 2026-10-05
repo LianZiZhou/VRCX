@@ -326,8 +326,26 @@ function createSessionKeeper(stores, options) {
         return false;
     };
 
+    /**
+     * Whether a client has signed in since the Hub was signed out. A client's
+     * sign-in -- a password, or answering the two-factor prompt the Hub
+     * cannot -- leaves a working session in the Hub's cookie jar and writes
+     * `lastUserLoggedIn` (upstream's logout flow removes it). Resuming that
+     * session is a plain `auth/user`; a password sign-in on top of it would be
+     * one more chance for VRChat to want a second factor.
+     *
+     * @returns {Promise<boolean>}
+     */
+    async function clientHasSignedIn() {
+        try {
+            return (await configRepository.getString('lastUserLoggedIn')) !== null;
+        } catch {
+            return false;
+        }
+    }
+
     /** @returns {Promise<boolean>} */
-    const attemptSignIn = () => (lastUserId ? resumeAttempt() : bootAttempt());
+    const attemptSignIn = async () => (lastUserId && !(await clientHasSignedIn()) ? resumeAttempt() : bootAttempt());
 
     /** A previous Hub process signed itself out and was restarted before it got back in. */
     async function adoptResumeMarker() {

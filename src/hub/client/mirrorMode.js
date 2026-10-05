@@ -44,6 +44,7 @@ import { injectPipelineMessage } from '../shared/pipelineRelay.js';
 import { suppressionStats } from './databaseGuard.js';
 import { notifyUplinkReady, replayFromHub, setUplinkSender, uplinkQueueDepth, uplinkStats } from './uplink.js';
 import { recordSocketMessage, SocketChannel } from './socketInspector.js';
+import { createSessionGuard } from './sessionGuard.js';
 import { watchState } from '../../services/watchState.js';
 
 /** How long to wait for a Hub before falling back to standalone. */
@@ -78,6 +79,8 @@ export const hubClientState = reactive({
     hubGameState: null,
     /** whether the Hub's own VRChat pipeline socket is up */
     pipelineConnected: false,
+    /** whether the Hub said, last time it told us, that it is signed in to VRChat */
+    hubSignedIn: false,
     clientCount: 0,
     reconnects: 0,
     resyncs: 0,
@@ -218,6 +221,58 @@ async function loadUpstreamHooks() {
     }
 }
 
+/**
+ * Drop whatever VRChat session this machine's own WebApi holds.
+ *
+ * It is the Hub's: earlier builds copied the Hub's cookies here, and the .NET
+ * side loads them from the local database at every start. VRChat now revokes a
+ * session token that a second client uses -- one avatar fetched by Windows'
+ * ImageCache with it was enough, within thirty seconds -- and the Hub's next
+ * sign-in then wanted a two-factor code. The fallback to standalone signs in
+ * afresh instead, as its own client.
+ *
+ * @param {object} localWebApi
+ */
+function forgetLocalSession(localWebApi) {
+    try {
+        Promise.resolve(localWebApi?.ClearCookies?.()).catch((err) =>
+            console.warn('[hub] Could not clear the local VRChat cookies:', err)
+        );
+    } catch (err) {
+        console.warn('[hub] Could not clear the local VRChat cookies:', err);
+    }
+}
+
+/**
+ * Keep upstream's automatic sign-outs off the Hub's session (see
+ * `sessionGuard.js`). Registered on Pinia before the app is mounted, so the
+ * auth store is wrapped as it is created.
+ *
+ * @param {{ call: (className: string, method: string, args: any[]) => Promise<any> }} transport
+ */
+async function installSessionGuard(transport) {
+    try {
+        const { pinia } = await import('../../stores/index.js');
+        const guard = createSessionGuard({
+            isHubSessionUsable: async () => {
+                const endpoint = hubClientState.hub?.endpointDomain || 'https://api.vrchat.cloud/api/1';
+                const result = await transport.call('WebApi', 'Execute', [
+                    { url: `${endpoint}/auth/user`, method: 'GET' }
+                ]);
+                if (result?.status !== 200) {
+                    return false;
+                }
+                const user = JSON.parse(result.message);
+                return Boolean(user?.id) && !user.requiresTwoFactorAuth;
+            },
+            reload: () => globalThis.location?.reload?.()
+        });
+        pinia.use(guard.plugin);
+    } catch (err) {
+        console.error('[hub] Could not install the sign-out guard:', err);
+    }
+}
+
 /** @returns {boolean} whether the store graph exists and the echo entry points with it */
 function storesReady() {
     const stores = globalThis.$pinia;
@@ -249,7 +304,7 @@ function applyHubInfo(info) {
 /**
  * @typedef {object} MirrorModeOptions
  * @property {object} storage - local VRCXStorage binding
- * @property {object} localWebApi - local WebApi binding, used for uploads and cookie mirroring
+ * @property {object} localWebApi - local WebApi binding, for third-party requests; it holds no VRChat session
  * @property {number} clientDatabaseVersion - the schema this client expects
  * @property {string} [clientName]
  * @property {(event: string, data: any) => void} [onHubEvent]
@@ -280,7 +335,7 @@ export async function initMirrorMode(options) {
         token: settings.token,
         clientName,
         onEvent: (event, data) => {
-            handleHubEvent(event, data, localWebApi);
+            handleHubEvent(event, data);
             onHubEvent(event, data);
         },
         onStateChange: (state, detail) => {
@@ -345,6 +400,8 @@ export async function initMirrorMode(options) {
     globalThis.__vrcxHub = { hubClientState, uplinkStats, suppressionStats, uplinkQueueDepth };
     console.log(`[hub] Mirroring ${settings.url} (${welcome.hub ?? 'unknown build'})`);
 
+    forgetLocalSession(localWebApi);
+    await installSessionGuard(transport);
     loadUpstreamHooks().catch((err) => console.error('[hub] Could not load the echo entry points:', err));
     // Nothing to flush yet, but a fresh process tells the Hub its game state
     // as soon as the store knows it; see notifyUplinkReady().
@@ -466,9 +523,8 @@ function replayEcho(event, data) {
 /**
  * @param {string} event
  * @param {any} data
- * @param {object} localWebApi
  */
-function handleHubEvent(event, data, localWebApi) {
+function handleHubEvent(event, data) {
     hubClientState.stats.lastEventAt = Date.now();
     if (event !== EventType.PIPELINE) {
         // The relayed pipeline is recorded where it is injected, as `vrchat`.
@@ -521,12 +577,11 @@ function handleHubEvent(event, data, localWebApi) {
             break;
 
         case EventType.SESSION:
-            // Cookie mirroring. Keeping a local copy of the Hub's session is
-            // what lets an offline fallback carry on without a fresh login and
-            // a 2FA prompt.
-            if (data?.cookies) {
-                localWebApi.SetCookies(data.cookies);
-            }
+            // No cookies here any more, on purpose: VRChat revokes a session
+            // whose token is used by a second client, and a mirror holding a
+            // copy used it for every notification avatar (Windows'
+            // ImageCache sends it to api.vrchat.cloud). See forgetLocalSession().
+            hubClientState.hubSignedIn = data?.loggedIn === true;
             // The Hub re-established its session (a 401 on this side is left
             // to the Hub to fix). Re-fetch the user soon rather than in five
             // minutes.

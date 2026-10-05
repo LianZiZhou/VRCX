@@ -9,7 +9,7 @@
  * line per event also keeps the log greppable.
  */
 
-import { inspect } from 'node:util';
+import { format, inspect } from 'node:util';
 
 /**
  * Print objects on a single line, two levels deep. Applies to every
@@ -20,6 +20,34 @@ import { inspect } from 'node:util';
 export function compactConsoleOutput(options = inspect.defaultOptions) {
     options.breakLength = Infinity;
     options.depth = 2;
+}
+
+/**
+ * @param {Date} date
+ * @returns {string} local time, `YYYY-MM-DD HH:MM:SS`
+ */
+export function formatTimestamp(date) {
+    const pad = (n) => String(n).padStart(2, '0');
+    return (
+        `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+        `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+    );
+}
+
+/**
+ * Prefix every console line with the local time. Without it a log that runs
+ * for weeks cannot be lined up against a client's log or against when
+ * something was noticed, which is what diagnosing a session that keeps dying
+ * needed most.
+ *
+ * @param {Console} [target]
+ * @param {() => Date} [now]
+ */
+export function stampConsoleOutput(target = console, now = () => new Date()) {
+    for (const method of ['log', 'info', 'warn', 'error', 'debug']) {
+        const original = target[method].bind(target);
+        target[method] = (...args) => original(`${formatTimestamp(now())} ${format(...args)}`);
+    }
 }
 
 /**

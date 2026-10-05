@@ -27,11 +27,25 @@ import { argsToWire } from '../shared/protocol.js';
  * thread — fatal on a box with no `openvr_api` native library), so
  * `AppApiInstance` is null there and any upload would throw.
  *
- * Uploads are low-frequency, user-initiated, and the client already holds a
- * mirrored copy of the Hub's cookies, so they run locally instead. This is what
- * buys us a zero-line diff in the C# tree.
+ * They used to run locally with a copy of the Hub's cookies. That copy is
+ * gone: VRChat revokes a session token that a second client uses, so a
+ * mirror uploading with it signed the Hub out (and cost it its remembered
+ * two-factor device). An upload to VRChat itself is therefore refused on a
+ * mirror for now; the S3 `PUT` that follows a file upload is pre-signed, needs
+ * no session, and still runs locally.
  */
 const LOCAL_ONLY_REQUEST_FLAGS = ['uploadImage', 'uploadImageLegacy', 'uploadFilePUT', 'uploadImagePrint'];
+
+/** What a refused upload answers, in the shape `services/request.js` reports. */
+export const UPLOAD_UNAVAILABLE = Object.freeze({
+    status: 403,
+    message: JSON.stringify({
+        error: {
+            message: '"Uploading is not available on a Hub mirror: the VRChat session belongs to the Hub"',
+            status_code: 403
+        }
+    })
+});
 
 /**
  * @param {any} options
@@ -151,7 +165,11 @@ export function createRemoteWebApi(transport, localWebApi, options = {}) {
      * @returns {Promise<{status: number, message: string}>}
      */
     async function execute(requestOptions) {
-        if (mustRunLocally(requestOptions) || !isHubBoundUrl(requestOptions?.url, endpointDomain())) {
+        const hubBound = isHubBoundUrl(requestOptions?.url, endpointDomain());
+        if (mustRunLocally(requestOptions)) {
+            return hubBound ? UPLOAD_UNAVAILABLE : executeLocally(requestOptions);
+        }
+        if (!hubBound) {
             return executeLocally(requestOptions);
         }
         return transport.call('WebApi', 'Execute', [requestOptions]);
