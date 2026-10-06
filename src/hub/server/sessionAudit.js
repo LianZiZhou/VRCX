@@ -52,26 +52,46 @@ export function classifySessionRequest(options) {
 }
 
 /**
+ * @typedef {object} SessionOutcome
+ * @property {number} status
+ * @property {string[]} secondFactor - what VRChat asks for, if it wants a second factor
+ * @property {boolean} unverified - a verification answered 200 with `verified: false`
+ */
+
+/**
  * @param {number} status
  * @param {string} message - the response body
- * @returns {string}
+ * @returns {SessionOutcome}
  */
-function describeOutcome(status, message) {
+export function readOutcome(status, message) {
+    const outcome = { status, secondFactor: [], unverified: false };
     if (status !== 200) {
-        return `${status}`;
+        return outcome;
     }
     try {
         const json = JSON.parse(message);
-        if (Array.isArray(json?.requiresTwoFactorAuth) && json.requiresTwoFactorAuth.length > 0) {
-            return `200, but VRChat wants a second factor (${json.requiresTwoFactorAuth.join(', ')})`;
+        if (Array.isArray(json?.requiresTwoFactorAuth)) {
+            outcome.secondFactor = json.requiresTwoFactorAuth.map(String);
         }
-        if (json?.verified === false) {
-            return '200, not verified';
-        }
+        outcome.unverified = json?.verified === false;
     } catch {
         // Not JSON; the status says enough.
     }
-    return '200';
+    return outcome;
+}
+
+/**
+ * @param {SessionOutcome} outcome
+ * @returns {string}
+ */
+function describeOutcome(outcome) {
+    if (outcome.secondFactor.length > 0) {
+        return `200, but VRChat wants a second factor (${outcome.secondFactor.join(', ')})`;
+    }
+    if (outcome.unverified) {
+        return '200, not verified';
+    }
+    return `${outcome.status}`;
 }
 
 /**
@@ -79,11 +99,14 @@ function describeOutcome(status, message) {
  * empty target, because the node-api-dotnet members are read-only.
  *
  * @param {object} WebApi
- * @param {{ log: (message: string) => void }} options
+ * @param {{
+ *   log: (message: string) => void,
+ *   onOutcome?: (kind: 'sign-in' | 'two-factor verification', outcome: SessionOutcome) => void
+ * }} options
  * @returns {object}
  */
 export function auditSessionChanges(WebApi, options) {
-    const { log } = options;
+    const { log, onOutcome = () => {} } = options;
 
     const executeJson = async function ExecuteJson(requestJson) {
         let kind = null;
@@ -95,11 +118,16 @@ export function auditSessionChanges(WebApi, options) {
         const who = caller();
         const json = await WebApi.ExecuteJson(requestJson);
         if (kind) {
+            let outcome = null;
             try {
                 const { status, message } = JSON.parse(json);
-                log(`VRChat ${kind} by ${who}: ${describeOutcome(status, String(message ?? ''))}`);
+                outcome = readOutcome(status, String(message ?? ''));
             } catch {
                 log(`VRChat ${kind} by ${who}: unreadable response`);
+            }
+            if (outcome) {
+                log(`VRChat ${kind} by ${who}: ${describeOutcome(outcome)}`);
+                onOutcome(kind, outcome);
             }
         }
         return json;

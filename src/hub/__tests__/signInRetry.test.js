@@ -481,3 +481,45 @@ describe('.NET runtime switches', () => {
         expect(configureDotnetSwitches({}, 'win32')).toEqual([]);
     });
 });
+
+describe('sign-in while VRChat waits for a second factor', () => {
+    it('asks who the jar belongs to instead of signing in with the password', async () => {
+        const { stores, calls } = fakeStores([null]);
+        let pending = false;
+        let answered = false;
+        const fetched = [];
+        const gate = {
+            secondFactorPending: () => pending,
+            secondFactorAnswered: () => answered,
+            settled: () => {
+                pending = false;
+                answered = false;
+            }
+        };
+        const fetchCurrentUser = async () => {
+            fetched.push(answered ? 'verified' : 'pending');
+            if (answered) {
+                stores.user.currentUser = { id: 'usr_x', displayName: 'x' };
+                watchState.isLoggedIn = true;
+            }
+        };
+        await start(stores, { signInGate: gate, fetchCurrentUser });
+        expect(watchState.isLoggedIn).toBe(true);
+
+        // Signed out, and the next password sign-in asked for a code.
+        pending = true;
+        signOut();
+        await until(() => fetched.length >= 1);
+        // Nothing signed in with the password while the code was outstanding.
+        expect(calls.relogin).toHaveLength(0);
+
+        // A client entered it.
+        pending = false;
+        answered = true;
+        await until(() => watchState.isLoggedIn);
+        expect(calls.relogin).toHaveLength(0);
+        expect(fetched.at(-1)).toBe('verified');
+        // Signed in: the gate is told, so the next sign-out starts afresh.
+        expect(answered).toBe(false);
+    });
+});

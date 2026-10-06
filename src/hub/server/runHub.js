@@ -21,6 +21,7 @@ import { createStatusServer } from './statusServer.js';
 import { logWebApiFailures } from './webApiLog.js';
 import { compactConsoleOutput, describeRejection, stampConsoleOutput } from './logFormat.js';
 import { auditSessionChanges, sessionCaller } from './sessionAudit.js';
+import { createSignInGate, governSignIn, guardCookieJar } from './signInAuthority.js';
 import { diagnoseVrchatReachability } from './networkCheck.js';
 import { EventType } from '../shared/protocol.js';
 import { HubMode, setHubMode } from '../shared/mode.js';
@@ -161,6 +162,10 @@ export async function runHub(options = {}) {
         await applyPendingImport({ configDir: config.configDir, databasePath, log });
     }
 
+    // Where the VRChat sign-in stands: who is waiting for a second factor, and
+    // whether a client has just answered it. Fed by sessionAudit.js.
+    const signInGate = createSignInGate();
+
     // --- native layer -----------------------------------------------------
     let natives = null;
     if (config.dryRun) {
@@ -183,7 +188,10 @@ export async function runHub(options = {}) {
         natives.WebApi = logWebApiFailures(natives.WebApi, { log });
         // Who signed in, verified a second factor or touched the cookie jar,
         // and what VRChat said.
-        natives.WebApi = auditSessionChanges(natives.WebApi, { log });
+        natives.WebApi = auditSessionChanges(natives.WebApi, { log, onOutcome: signInGate.note });
+        // Outermost, so a client's SetCookies passes through it too: the jar
+        // only moves forward, and a sign-out keeps the two-factor device.
+        natives.WebApi = guardCookieJar(natives.WebApi, { log });
     }
 
     // One connection, many writers: the Hub's own statements and every
@@ -201,6 +209,22 @@ export async function runHub(options = {}) {
     // --- data core --------------------------------------------------------
     setHubMode(HubMode.HUB);
     const { app, stores } = await startHubCore();
+    // One authority over re-logins; see server/signInAuthority.js.
+    governSignIn(stores.auth, {
+        gate: signInGate,
+        log,
+        sessionAnswers: async () => {
+            const json = await natives.WebApi.ExecuteJson(
+                JSON.stringify({ url: `${AppDebug.endpointDomain}/auth/user`, method: 'GET' })
+            );
+            const { status, message } = JSON.parse(json);
+            if (status !== 200) {
+                return false;
+            }
+            const user = JSON.parse(message);
+            return Boolean(user?.id) && !user.requiresTwoFactorAuth;
+        }
+    });
     log(`Data core up: ${Object.keys(stores).length} stores`);
 
     // --- transport --------------------------------------------------------
@@ -542,9 +566,12 @@ export async function runHub(options = {}) {
     // connect to and sees the session events as they happen.
     const shutdown = new AbortController();
     if (startRuntime) {
+        // A client entered the code: resume that session now, not after the back-off.
+        signInGate.onAnswered(() => signInWake());
         const databaseReady = await startHubRuntime(stores, {
             log,
             signal: shutdown.signal,
+            signInGate,
             onRetryControls: (controls) => {
                 signInWake = controls.wake;
             },

@@ -28,6 +28,7 @@ import { createGlobalStores, pinia } from '../../stores';
 import { i18n, loadLocalizedStrings } from '../../plugins/i18n';
 import { addGameLogEvent } from '../../coordinators/gameLogCoordinator';
 import { runUpdateIsGameRunningFlow, runUpdateIsHmdAfkFlow } from '../../coordinators/gameCoordinator';
+import { getCurrentUser } from '../../coordinators/userCoordinator';
 import { initDayjs } from '../../plugins/dayjs';
 import { router } from '../shims/router.js';
 
@@ -154,6 +155,9 @@ function sleep(ms, signal) {
  * @property {(controls: { wake: () => void }) => void} [onRetryControls] - receives a `wake()`
  *   that cuts the current back-off short, for when a client has just signed in
  * @property {{ intervalMs?: number, graceMs?: number, reconnect?: () => void }} [watchdog]
+ * @property {{ secondFactorPending: () => boolean, secondFactorAnswered: () => boolean, settled: () => void }} [signInGate]
+ *   - where the sign-in stands (`server/signInAuthority.js`); without it every retry may use the password
+ * @property {() => Promise<unknown>} [fetchCurrentUser] - `auth/user` with the current jar (a test seam)
  */
 
 /** @returns {boolean} */
@@ -254,7 +258,15 @@ async function describeSilentSignInFailure(stores) {
  * @returns {{ signIn: () => Promise<void> }}
  */
 function createSessionKeeper(stores, options) {
-    const { log = () => {}, onSignInFailure = null, signal = null, retry = {}, onRetryControls = null } = options;
+    const {
+        log = () => {},
+        onSignInFailure = null,
+        signal = null,
+        retry = {},
+        onRetryControls = null,
+        signInGate = null,
+        fetchCurrentUser = getCurrentUser
+    } = options;
     const minMs = retry.minMs ?? SIGN_IN_RETRY_MIN_MS;
     const maxMs = retry.maxMs ?? SIGN_IN_RETRY_MAX_MS;
     const settleMs = retry.settleMs ?? SIGN_IN_SETTLE_MS;
@@ -290,6 +302,28 @@ function createSessionKeeper(stores, options) {
             return true;
         }
         // No throw and no user: upstream's "stay at the login dialog" case.
+        log(`Sign-in attempt ${attempt} did not sign in: ${await describeSilentSignInFailure(stores)}`);
+        return false;
+    };
+
+    /**
+     * The jar already holds the session to use: a client has just entered the
+     * two-factor code, or is about to. Ask VRChat who that is, and sign in
+     * nothing new -- a password sign-in now would replace the session the
+     * code is for.
+     */
+    const sessionAttempt = async () => {
+        attempt += 1;
+        try {
+            await fetchCurrentUser();
+        } catch (err) {
+            log(`Sign-in attempt ${attempt} failed: ${firstLine(err)}`);
+            return false;
+        }
+        await awaitUpstreamAutoLogin(stores, settleMs, signal);
+        if (isSignedIn()) {
+            return true;
+        }
         log(`Sign-in attempt ${attempt} did not sign in: ${await describeSilentSignInFailure(stores)}`);
         return false;
     };
@@ -345,7 +379,12 @@ function createSessionKeeper(stores, options) {
     }
 
     /** @returns {Promise<boolean>} */
-    const attemptSignIn = async () => (lastUserId && !(await clientHasSignedIn()) ? resumeAttempt() : bootAttempt());
+    const attemptSignIn = async () => {
+        if (signInGate?.secondFactorPending() || signInGate?.secondFactorAnswered()) {
+            return sessionAttempt();
+        }
+        return lastUserId && !(await clientHasSignedIn()) ? resumeAttempt() : bootAttempt();
+    };
 
     /** A previous Hub process signed itself out and was restarted before it got back in. */
     async function adoptResumeMarker() {
@@ -407,6 +446,12 @@ function createSessionKeeper(stores, options) {
         (loggedIn) => {
             if (loggedIn) {
                 lastUserId = stores.user.currentUser?.id ?? lastUserId;
+                signInGate?.settled();
+                // Upstream set this when it opened a prompt nobody on a Hub
+                // can see; signed in, there is nothing waiting any more.
+                if (stores.auth && 'twoFactorAuthDialogVisible' in stores.auth) {
+                    stores.auth.twoFactorAuthDialogVisible = false;
+                }
                 configRepository.remove(RESUME_USER_KEY).catch(() => {});
                 return;
             }

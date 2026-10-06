@@ -364,6 +364,21 @@ sign-in, two-factor verification and change to the cookie jar gets one log
 line saying who did it (the Hub or a named client) and how VRChat answered
 (`server/sessionAudit.js`), and every log line carries the local time.
 
+**One authority over the sign-in.** On a shared cookie jar, upstream's
+recovery from a 401 fed itself: every request in flight with the dead token
+came back 401 after the first re-login and started another; each re-login
+first restored the cookies saved at the previous sign-in, overwriting the
+`auth` just obtained and the `twoFactorAuth` device cookie; the fourth in an
+hour signed out and cleared the jar; and while someone entered the OTP on a
+mirror, the Hub's own retry signed in with the password again and replaced
+the session the code was for. `server/signInAuthority.js` now has a 401 ask
+`auth/user` first (once, for any number of 401s) and re-login only if the
+session really is gone; the jar only moves forward (saved cookies are not
+restored, and `SetCookies` from anyone only adds what is missing); a sign-out
+keeps the two-factor device cookie; and while VRChat waits for a second factor
+nothing signs in with the password -- the Hub only asks `auth/user`, and the
+moment a client's verification succeeds it resumes that session.
+
 **Staying signed in.** Upstream's answer to a dead session is the login
 dialog: a 401 triggers an automatic re-login, and after three of those in an
 hour it logs out and waits for a click. A Hub has nobody to click, so
