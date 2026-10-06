@@ -45,9 +45,11 @@ const ALLOWANCE = {
     // the arrival either; the first stop after login was lost.
     'src/coordinators/userEventCoordinator.js': 6,
     'src/services/database/index.js': 15,
-    // A failed request's Error was JSON.stringified into "{}", and a 401 on
-    // a mirror must not re-authenticate the Hub's session from the mirror.
-    'src/services/request.js': 14,
+    // A failed request's Error was JSON.stringified into "{}", a 401 on a
+    // mirror must not re-authenticate the Hub's session from the mirror, and a
+    // sign-in (Authorization header) must not be merged with a plain GET of
+    // the same URL: it got the plain request's 401 and signed the Hub out.
+    'src/services/request.js': 20,
     'src/services/websocket.js': 25,
     'src/stores/updateLoop.js': 60,
     'src/stores/vrcx.js': 44,

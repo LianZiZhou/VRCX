@@ -21,7 +21,13 @@ import { createStatusServer } from './statusServer.js';
 import { logWebApiFailures } from './webApiLog.js';
 import { compactConsoleOutput, describeRejection, stampConsoleOutput } from './logFormat.js';
 import { auditSessionChanges, sessionCaller } from './sessionAudit.js';
-import { createSignInGate, governSignIn, guardCookieJar } from './signInAuthority.js';
+import {
+    createClientSessionPolicy,
+    createSessionLock,
+    createSignInGate,
+    governSignIn,
+    guardCookieJar
+} from './signInAuthority.js';
 import { diagnoseVrchatReachability } from './networkCheck.js';
 import { EventType } from '../shared/protocol.js';
 import { HubMode, setHubMode } from '../shared/mode.js';
@@ -36,6 +42,8 @@ import { startHubCore, startHubRuntime } from '../bootstrap/core.js';
 import { UplinkKind } from '../client/uplink.js';
 import { withRequestCoalescing } from './requestCoalescer.js';
 import { addGameLogEntry, tryLoadPlayerList } from '../../coordinators/gameLogCoordinator';
+import { runInitFriendsListFlow } from '../../coordinators/friendSyncCoordinator';
+import { i18n } from '../../plugins/i18n';
 import { AppDebug } from '../../services/appConfig';
 import { wsState } from '../../services/websocket.js';
 import { watchState } from '../../services/watchState.js';
@@ -84,6 +92,10 @@ function replayGameLogBacklog(entries) {
         addGameLogEntry(gameLog, location);
     }
 }
+
+/** The first retry of a friend list that failed on a working session, and the longest gap. */
+const FRIEND_RETRY_MIN_MS = 5000;
+const FRIEND_RETRY_MAX_MS = 120000;
 
 /**
  * @param {{ argv?: string[], rootDir?: string, startRuntime?: boolean,
@@ -165,6 +177,8 @@ export async function runHub(options = {}) {
     // Where the VRChat sign-in stands: who is waiting for a second factor, and
     // whether a client has just answered it. Fed by sessionAudit.js.
     const signInGate = createSignInGate();
+    // Everything that changes the VRChat session runs one at a time.
+    const sessionLock = createSessionLock();
 
     // --- native layer -----------------------------------------------------
     let natives = null;
@@ -188,10 +202,14 @@ export async function runHub(options = {}) {
         natives.WebApi = logWebApiFailures(natives.WebApi, { log });
         // Who signed in, verified a second factor or touched the cookie jar,
         // and what VRChat said.
-        natives.WebApi = auditSessionChanges(natives.WebApi, { log, onOutcome: signInGate.note });
-        // Outermost, so a client's SetCookies passes through it too: the jar
-        // only moves forward, and a sign-out keeps the two-factor device.
-        natives.WebApi = guardCookieJar(natives.WebApi, { log });
+        natives.WebApi = auditSessionChanges(natives.WebApi, {
+            log,
+            onOutcome: signInGate.note
+        });
+        // Outermost, so every caller goes through it: the jar is never cleared
+        // under a request in flight, only moves forward, and a sign-out keeps
+        // the two-factor device.
+        natives.WebApi = guardCookieJar(natives.WebApi, { log, lock: sessionLock });
     }
 
     // One connection, many writers: the Hub's own statements and every
@@ -209,20 +227,56 @@ export async function runHub(options = {}) {
     // --- data core --------------------------------------------------------
     setHubMode(HubMode.HUB);
     const { app, stores } = await startHubCore();
+    // The friend list failed to load on a session that still works, and the
+    // sign-out upstream would have done was declined: load it again, backing
+    // off, until it loads or the Hub is signed out for real.
+    let friendRetryTimer = null;
+    let friendRetryDelay = FRIEND_RETRY_MIN_MS;
+    const retryFriendList = () => {
+        if (friendRetryTimer) {
+            return;
+        }
+        friendRetryTimer = setTimeout(async () => {
+            friendRetryTimer = null;
+            if (!watchState.isLoggedIn || watchState.isFriendsLoaded) {
+                friendRetryDelay = FRIEND_RETRY_MIN_MS;
+                return;
+            }
+            friendRetryDelay = Math.min(friendRetryDelay * 2, FRIEND_RETRY_MAX_MS);
+            log('Loading the friend list again');
+            try {
+                await runInitFriendsListFlow(i18n.global.t);
+            } catch {
+                // It reports its own failure, and may ask to sign out again.
+            }
+        }, friendRetryDelay);
+        friendRetryTimer.unref?.();
+    };
+
     // One authority over re-logins; see server/signInAuthority.js.
     governSignIn(stores.auth, {
         gate: signInGate,
+        lock: sessionLock,
         log,
+        onSignOutDeclined: () => retryFriendList(),
+        // A user from auth/user, and data from outside it: auth/user alone
+        // once answered while everything else said "Missing Credentials".
         sessionAnswers: async () => {
-            const json = await natives.WebApi.ExecuteJson(
-                JSON.stringify({ url: `${AppDebug.endpointDomain}/auth/user`, method: 'GET' })
-            );
-            const { status, message } = JSON.parse(json);
-            if (status !== 200) {
+            const get = async (path) =>
+                JSON.parse(
+                    await natives.WebApi.ExecuteJson(
+                        JSON.stringify({ url: `${AppDebug.endpointDomain}/${path}`, method: 'GET' })
+                    )
+                );
+            const me = await get('auth/user');
+            if (me.status !== 200) {
                 return false;
             }
-            const user = JSON.parse(message);
-            return Boolean(user?.id) && !user.requiresTwoFactorAuth;
+            const user = JSON.parse(me.message);
+            if (!user?.id || user.requiresTwoFactorAuth) {
+                return false;
+            }
+            return (await get('auth/user/friends?offline=false&n=1')).status === 200;
         }
     });
     log(`Data core up: ${Object.keys(stores).length} stores`);
@@ -251,6 +305,12 @@ export async function runHub(options = {}) {
 
     const interop = createInteropHandler({ SQLite: nativeSQLite, WebApi: natives.WebApi }, { sqliteForClient });
     const coalesced = withRequestCoalescing(interop, { ttlMs: 0 });
+    // What a client may do to the session; see signInAuthority.js.
+    const clientSessionPolicy = createClientSessionPolicy({
+        lock: sessionLock,
+        hubSignedIn: () => watchState.isLoggedIn === true,
+        log
+    });
     const handleCall = async (className, method, args, client) => {
         if (config.verbose) {
             log(`call ${className}.${method} from ${client?.clientName ?? '?'}`);
@@ -258,7 +318,11 @@ export async function runHub(options = {}) {
         if (className === 'SQLite' && (method === 'ExecuteNonQuery' || method === 'ExecuteInsert')) {
             configSync.observe(args?.[0], args?.[1] ?? null);
         }
-        return sessionCaller.run(client?.clientName ?? 'a client', () => coalesced(className, method, args, client));
+        return sessionCaller.run(client?.clientName ?? 'a client', () =>
+            clientSessionPolicy(className, method, args, client, (callArgs) =>
+                coalesced(className, method, callArgs, client)
+            )
+        );
     };
 
     /**
@@ -606,6 +670,7 @@ export async function runHub(options = {}) {
         log('Shutting down');
         shutdown.abort();
         clearInterval(sessionTimer);
+        clearTimeout(friendRetryTimer);
         stopPipelineWatch();
         setPipelineObserver(null);
         registry.dispose();

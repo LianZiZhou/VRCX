@@ -364,20 +364,31 @@ sign-in, two-factor verification and change to the cookie jar gets one log
 line saying who did it (the Hub or a named client) and how VRChat answered
 (`server/sessionAudit.js`), and every log line carries the local time.
 
-**One authority over the sign-in.** On a shared cookie jar, upstream's
-recovery from a 401 fed itself: every request in flight with the dead token
-came back 401 after the first re-login and started another; each re-login
-first restored the cookies saved at the previous sign-in, overwriting the
-`auth` just obtained and the `twoFactorAuth` device cookie; the fourth in an
-hour signed out and cleared the jar; and while someone entered the OTP on a
-mirror, the Hub's own retry signed in with the password again and replaced
-the session the code was for. `server/signInAuthority.js` now has a 401 ask
-`auth/user` first (once, for any number of 401s) and re-login only if the
-session really is gone; the jar only moves forward (saved cookies are not
-restored, and `SetCookies` from anyone only adds what is missing); a sign-out
-keeps the two-factor device cookie; and while VRChat waits for a second factor
-nothing signs in with the password -- the Hub only asks `auth/user`, and the
-moment a client's verification succeeds it resumes that session.
+**One authority over the session.** On a shared cookie jar, upstream's
+recovery from a 401 destroyed every new session within seconds. The root is
+in the C# `WebApi.ClearCookies()`, which installs a new `CookieContainer` and
+`HttpClient` instead of emptying the jar: a sign-in in flight when the jar is
+cleared stores its fresh `auth` in the discarded container, says 200, and
+leaves every later request with no cookie ("Missing Credentials"). Upstream
+then made the overlap routine: one failing friends page starts both a
+password sign-in (`handleAutoLogin`) and a sign-out that clears the jar
+without awaiting it, and the sign-out resets the three-per-hour counter, so
+the loop never stops. `server/signInAuthority.js` puts every session change --
+re-login, sign-out, clearing or setting cookies, a client's sign-in or
+two-factor verification -- under one re-entrant lock that is held until work
+started inside it has finished; a jar clear waits for the requests in flight
+and keeps the two-factor device cookie; a 401 or an automatic sign-out acts
+only if `auth/user` and an endpoint outside it both fail; saved cookies never
+overwrite the jar; and while VRChat waits for a second factor nothing signs
+in with the password. `services/request.js` no longer merges a sign-in (its
+Authorization header is not in the URL) with a plain GET of `auth/user`.
+
+Clients cannot touch the session: `GetCookies` hands them only the device
+cookie, `SetCookies` is refused, `ClearCookies` goes through only for the
+person's own "Log out" (marked by `client/sessionGuard.js`), and a client's
+password sign-in is answered with the Hub's session while the Hub is signed
+in. A mirror on the login page while the Hub is signed in takes over the
+Hub's session by itself; there is nothing to sign in to.
 
 **Staying signed in.** Upstream's answer to a dead session is the login
 dialog: a 401 triggers an automatic re-login, and after three of those in an

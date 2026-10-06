@@ -243,6 +243,43 @@ function forgetLocalSession(localWebApi) {
     }
 }
 
+/** How often a signed-out mirror checks whether it can simply use the Hub's session. */
+const RESUME_CHECK_MS = 5000;
+/** And how long it leaves between attempts. */
+const RESUME_RETRY_MS = 30000;
+let resumeTimer = null;
+let lastResumeAt = 0;
+
+/**
+ * A mirror on the login page while the Hub is signed in has nothing to sign
+ * in to: the session is the Hub's. Upstream would leave it there until the
+ * person signs in again, and every way of doing that touched the Hub's
+ * session. So it just asks the Hub who is signed in, which signs the mirror in
+ * as that user -- at start-up when the stored login is gone, and after the Hub
+ * signs back in.
+ */
+function startResumeWatch() {
+    if (resumeTimer) {
+        return;
+    }
+    resumeTimer = setInterval(async () => {
+        if (!hubClientState.active || !hubClientState.hubSignedIn || watchState.isLoggedIn) {
+            return;
+        }
+        if (!globalThis.$pinia?.auth || Date.now() - lastResumeAt < RESUME_RETRY_MS) {
+            return;
+        }
+        lastResumeAt = Date.now();
+        try {
+            const { getCurrentUser } = await import('../../coordinators/userCoordinator.js');
+            console.log('[hub] The Hub is signed in to VRChat; signing this window in with its session');
+            await getCurrentUser();
+        } catch (err) {
+            console.warn('[hub] Could not take over the Hub session yet:', err?.message ?? err);
+        }
+    }, RESUME_CHECK_MS);
+}
+
 /**
  * Keep upstream's automatic sign-outs off the Hub's session (see
  * `sessionGuard.js`). Registered on Pinia before the app is mounted, so the
@@ -402,6 +439,7 @@ export async function initMirrorMode(options) {
 
     forgetLocalSession(localWebApi);
     await installSessionGuard(transport);
+    startResumeWatch();
     loadUpstreamHooks().catch((err) => console.error('[hub] Could not load the echo entry points:', err));
     // Nothing to flush yet, but a fresh process tells the Hub its game state
     // as soon as the store knows it; see notifyUplinkReady().
@@ -623,6 +661,10 @@ export function leaveMirrorMode(options = {}) {
     if (storesPollTimer) {
         clearInterval(storesPollTimer);
         storesPollTimer = null;
+    }
+    if (resumeTimer) {
+        clearInterval(resumeTimer);
+        resumeTimer = null;
     }
     if (options.reload !== false && typeof globalThis.location?.reload === 'function') {
         globalThis.location.reload();

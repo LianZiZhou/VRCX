@@ -17,6 +17,7 @@
  */
 
 import { argsToWire } from '../shared/protocol.js';
+import { consumeSignOutIntent } from './sessionGuard.js';
 
 /**
  * Request shapes that must not run on the Hub.
@@ -224,19 +225,25 @@ export function createRemoteWebApi(transport, localWebApi, options = {}) {
          * @param {string} cookies
          * @returns {Promise<void>}
          */
-        async SetCookies(cookies) {
-            return transport.call('WebApi', 'SetCookies', [cookies]);
+        async SetCookies(_cookies) {
+            // Upstream's relogin restores the cookies saved at the last
+            // sign-in; on a mirror those are the Hub's, older than its jar,
+            // and the Hub refuses them anyway. Nothing to send.
         },
 
         /**
          * Clearing cookies on a mirror client logs out the *Hub*, and therefore
-         * every other client, and stops 24/7 collection. The confirmation for
-         * that lives in the UI layer; this call is the point of no return.
+         * every other client, and stops 24/7 collection -- when the person
+         * asked for it. The call says whether they did; upstream also clears
+         * on its own (a sign-out after a failed friend list, a retried 2FA),
+         * and the Hub ignores those.
          *
          * @returns {Promise<void>}
          */
         async ClearCookies() {
-            return transport.call('WebApi', 'ClearCookies', []);
+            // Only the person's own "Log out" signs the Hub out; the Hub
+            // ignores the automatic ones (see server/signInAuthority.js).
+            return transport.call('WebApi', 'ClearCookies', [{ userInitiated: consumeSignOutIntent() }]);
         }
     };
 }

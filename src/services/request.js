@@ -97,8 +97,8 @@ export function request(endpoint, options) {
             }
             failedGetRequests.delete(endpoint);
         }
-        // merge requests
-        req = pendingGetRequests.get(init.url);
+        // merge requests ([hub]: never a sign-in, whose Authorization header the URL does not show)
+        req = options?.headers ? undefined : pendingGetRequests.get(init.url);
         if (typeof req !== 'undefined') {
             if (req.time >= Date.now() - 10000) {
                 // 10s
@@ -219,7 +219,8 @@ export function request(endpoint, options) {
             }
             $throw(status, data, endpoint);
         });
-    if (init.method === 'GET') {
+    if (init.method === 'GET' && !options?.headers) {
+        // [hub] (see above)
         req.finally(() => {
             pendingGetRequests.delete(init.url);
         });

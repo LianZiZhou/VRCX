@@ -2,7 +2,13 @@
  * [hub] A mirror's automatic sign-out leaves the Hub's session alone.
  */
 
-import { createSessionGuard } from '../client/sessionGuard.js';
+import { consumeSignOutIntent, createSessionGuard, MAX_RELOADS, SIGN_OUT_INTENT_MS } from '../client/sessionGuard.js';
+
+/** A sessionStorage stand-in. */
+function memoryStorage() {
+    const values = new Map();
+    return { getItem: (k) => values.get(k) ?? null, setItem: (k, v) => values.set(k, v) };
+}
 import { HubMode, setHubMode } from '../shared/mode.js';
 
 /**
@@ -52,7 +58,8 @@ describe('mirror sign-out guard', () => {
             isHubSessionUsable: async () => usable,
             reload: () => reloads.push('reload'),
             log: () => {},
-            setTimer: clock.setTimer
+            setTimer: clock.setTimer,
+            storage: memoryStorage()
         });
         guard.plugin({ store });
 
@@ -68,9 +75,57 @@ describe('mirror sign-out guard', () => {
         expect(reloads).toEqual([]);
         expect(clock.timers).toHaveLength(1);
 
+        // Usable once is not enough: the Hub's sessions used to die seconds in.
         usable = true;
         await clock.runNext();
+        expect(reloads).toEqual([]);
+        await clock.runNext();
         expect(reloads).toEqual(['reload']);
+    });
+
+    it('stops reloading after a few, so a Hub whose session keeps dying does not loop the window', async () => {
+        setHubMode(HubMode.MIRROR);
+        const storage = memoryStorage();
+        const reloads = [];
+        for (let round = 0; round < MAX_RELOADS + 1; round++) {
+            // Each reload is a fresh page: a fresh guard, the same sessionStorage.
+            const store = fakeAuthStore();
+            const clock = manualTimers();
+            const guard = createSessionGuard({
+                isHubSessionUsable: async () => true,
+                reload: () => reloads.push(round),
+                log: () => {},
+                setTimer: clock.setTimer,
+                storage
+            });
+            guard.plugin({ store });
+            await store.handleLogoutEvent();
+            await clock.runNext();
+            await clock.runNext();
+        }
+        expect(reloads).toEqual([0, 1, 2]);
+    });
+
+    it("marks the person's own Log out so the Hub knows the cookie clear is theirs", async () => {
+        setHubMode(HubMode.MIRROR);
+        const store = fakeAuthStore();
+        let time = 1000;
+        const guard = createSessionGuard({
+            isHubSessionUsable: async () => true,
+            reload: () => {},
+            log: () => {},
+            now: () => time
+        });
+        guard.plugin({ store });
+        expect(consumeSignOutIntent(time)).toBe(false);
+        await store.logout();
+        expect(consumeSignOutIntent(time)).toBe(true);
+        // Once only.
+        expect(consumeSignOutIntent(time)).toBe(false);
+        // And not forever: a dismissed dialog does not arm a clear minutes later.
+        await store.logout();
+        time += SIGN_OUT_INTENT_MS + 1;
+        expect(consumeSignOutIntent(time)).toBe(false);
     });
 
     it('still signs out when the person asks to, which signs the Hub out as documented', async () => {

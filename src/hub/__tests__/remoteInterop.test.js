@@ -239,6 +239,26 @@ describe('remote interop', () => {
             expect(isHubBoundUrl(undefined)).toBe(true);
         });
 
+        it("never sends cookies to the Hub, and says whether a clear is the person's", async () => {
+            const { markSignOutIntent } = await import('../client/sessionGuard.js');
+            const localWebApi = createFakeNativeWebApi();
+            const webApi = createRemoteWebApi(transport, localWebApi);
+            const before = transport.sent.length;
+
+            // Upstream's relogin restoring the saved cookies: nothing goes out.
+            await webApi.SetCookies('saved-cookies');
+            expect(transport.sent.length).toBe(before);
+
+            await webApi.ClearCookies();
+            markSignOutIntent();
+            await webApi.ClearCookies();
+            const clears = transport.sent.slice(before).map((wire) => decodeFrame(wire).p);
+            expect(clears).toEqual([
+                { c: 'WebApi', m: 'ClearCookies', a: [{ userInitiated: false }] },
+                { c: 'WebApi', m: 'ClearCookies', a: [{ userInitiated: true }] }
+            ]);
+        });
+
         it('runs third-party requests on the local WebApi', async () => {
             const localWebApi = createFakeNativeWebApi();
             localWebApi.setResponse({ status: 200, message: '{"tag_name":"v1"}' });
