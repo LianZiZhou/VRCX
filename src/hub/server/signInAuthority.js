@@ -41,8 +41,6 @@
  *     password; once someone answers it, the Hub resumes that session.
  */
 
-import { AsyncLocalStorage } from 'node:async_hooks';
-
 /** A pending second factor older than this no longer holds off a password sign-in. */
 export const SECOND_FACTOR_WAIT_MS = 10 * 60 * 1000;
 
@@ -99,45 +97,32 @@ export function deviceCookiesOnly(blob) {
 /**
  * A FIFO mutex for session changes.
  *
- * Re-entrant: work started from inside a held lock (upstream's sign-out calls
- * `clearCookies()` from inside a re-login, say) runs at once instead of
- * queueing behind the task that is waiting for it. And the holder keeps the
- * lock until that nested work has finished too, even when nobody awaited it --
- * `runLogoutFlow` does not await its `clearCookies()`, and a re-login queued
- * behind it must not start while that clear is still under way.
+ * Deliberately not re-entrant. An earlier version told nested calls apart with
+ * AsyncLocalStorage, and that context leaks: every timer and request started
+ * inside a locked task inherits it, so the friend-list retry scheduled from a
+ * declined sign-out, or a 401 from the burst a sign-in starts, looked
+ * "nested", skipped the queue, and ran a re-login next to the check it was
+ * meant to wait for. Instead, nothing that runs under the lock calls into the
+ * lock again: the Hub's own re-login does not go through upstream's
+ * auto-login flow (which signs out from inside), and jar clears do not take
+ * the lock -- a task that may have caused one waits for it with
+ * `jar.whenSettled()` before it lets go.
  *
  * @returns {{ run: <T>(task: () => Promise<T> | T) => Promise<T>, readonly held: boolean }}
  */
 export function createSessionLock() {
-    const context = new AsyncLocalStorage();
     let tail = Promise.resolve();
     let held = false;
-
     return {
         run(task) {
-            const holder = context.getStore();
-            if (holder) {
-                const nested = Promise.resolve().then(task);
-                holder.pending.add(nested.catch(() => {}));
-                return nested;
-            }
-            const owner = { pending: new Set() };
-            const result = tail.then(() =>
-                context.run(owner, async () => {
-                    held = true;
-                    try {
-                        return await task();
-                    } finally {
-                        // Whatever the task started and left running.
-                        while (owner.pending.size > 0) {
-                            const waiting = [...owner.pending];
-                            owner.pending.clear();
-                            await Promise.all(waiting);
-                        }
-                        held = false;
-                    }
-                })
-            );
+            const result = tail.then(async () => {
+                held = true;
+                try {
+                    return await task();
+                } finally {
+                    held = false;
+                }
+            });
             tail = result.catch(() => {});
             return result;
         },
@@ -205,13 +190,14 @@ export function createSignInGate(options = {}) {
  * @param {object} WebApi
  * @param {object} options
  * @param {(message: string) => void} options.log
- * @param {ReturnType<typeof createSessionLock>} options.lock
  * @param {number} [options.drainTimeoutMs]
- * @returns {object}
+ * @returns {object} the wrapped binding, plus `whenSettled()`: resolves once no jar clear is pending
  */
 export function guardCookieJar(WebApi, options) {
-    const { log, lock, drainTimeoutMs = DRAIN_TIMEOUT_MS } = options;
+    const { log, drainTimeoutMs = DRAIN_TIMEOUT_MS } = options;
     let inFlight = 0;
+    /** @type {Set<Promise<void>>} */
+    const clearing = new Set();
     /** @type {Set<() => void>} */
     const idleWaiters = new Set();
 
@@ -253,21 +239,19 @@ export function guardCookieJar(WebApi, options) {
             }
         },
         SetCookies(blob) {
-            return lock.run(async () => {
-                const current = new Set(decodeCookies(await WebApi.GetCookies()).map(cookieKey));
-                const incoming = decodeCookies(blob);
-                const missing = incoming.filter((cookie) => !current.has(cookieKey(cookie)));
-                if (missing.length < incoming.length) {
-                    const kept = incoming.length - missing.length;
-                    log(`Kept the Hub's own VRChat cookies over ${kept} older cop${kept === 1 ? 'y' : 'ies'}`);
-                }
-                if (missing.length > 0) {
-                    await WebApi.SetCookies(encodeCookies(missing));
-                }
-            });
+            const current = new Set(decodeCookies(WebApi.GetCookies()).map(cookieKey));
+            const incoming = decodeCookies(blob);
+            const missing = incoming.filter((cookie) => !current.has(cookieKey(cookie)));
+            if (missing.length < incoming.length) {
+                const kept = incoming.length - missing.length;
+                log(`Kept the Hub's own VRChat cookies over ${kept} older cop${kept === 1 ? 'y' : 'ies'}`);
+            }
+            if (missing.length > 0) {
+                WebApi.SetCookies(encodeCookies(missing));
+            }
         },
         ClearCookies() {
-            return lock.run(async () => {
+            const clear = (async () => {
                 if (!(await drained())) {
                     log(`Clearing the VRChat cookies with ${inFlight} request(s) still out after waiting`);
                 }
@@ -278,7 +262,15 @@ export function guardCookieJar(WebApi, options) {
                     WebApi.SetCookies(device);
                     log('Kept the remembered two-factor device across the sign-out');
                 }
-            });
+            })();
+            clearing.add(clear);
+            clear.finally(() => clearing.delete(clear)).catch(() => {});
+            return clear;
+        },
+        async whenSettled() {
+            while (clearing.size > 0) {
+                await Promise.allSettled([...clearing]);
+            }
         }
     };
 
@@ -301,29 +293,46 @@ export function guardCookieJar(WebApi, options) {
 
 /**
  * Replace the auth store's session entry points on the Hub. Upstream reaches
- * these through the store object -- `services/request.js` and
- * `friendSyncCoordinator.js` call `authStore.handleAutoLogin()` /
- * `authStore.handleLogoutEvent()`, `authAutoLoginCoordinator.js` and the session
- * keeper call `authStore.relogin()` -- so replacing the store's members catches
- * them. What the store calls from inside its own closure (`relogin`'s sign-out
- * on failure, `login()`'s clearCookies) is not caught here; the cookie guard's
- * lock and drain cover those.
+ * these through the store object -- `services/request.js` calls
+ * `authStore.handleAutoLogin()`, `friendSyncCoordinator.js` and
+ * `services/request.js` call `authStore.handleLogoutEvent()`, the session
+ * keeper calls `authStore.relogin()` -- so replacing the store's members
+ * catches them. What the store calls inside its own closure (`relogin`'s
+ * sign-out on failure, `login()`'s clearCookies) is not caught here; those
+ * only ever clear the jar, which `guardCookieJar` drains, and the task that
+ * caused them waits for `jar.whenSettled()`.
+ *
+ * The Hub's re-login after a 401 does not run upstream's
+ * `runHandleAutoLoginFlow`: that signs out from inside itself (the three-per-
+ * hour rule), which under one lock would wait for itself, and its counter is
+ * reset by every sign-out anyway. The check-first rule here replaces it.
  *
  * @param {object} auth - the auth store. Its session actions are replaced, deliberately;
  *   this is not state, and the lint rule against store assignment does not apply to it.
  * @param {object} options
  * @param {ReturnType<typeof createSignInGate>} options.gate
  * @param {ReturnType<typeof createSessionLock>} options.lock
+ * @param {{ whenSettled?: () => Promise<void> }} [options.jar] - the guarded WebApi
  * @param {() => Promise<boolean>} options.sessionAnswers - does the current jar get a user and data back
  * @param {(message: string) => void} options.log
+ * @param {() => boolean} [options.primaryPasswordEnabled] - upstream never signs in by itself then
  * @param {() => void} [options.onSignOutDeclined] - an automatic sign-out was skipped; e.g. load the friends again
  * @param {() => number} [options.now]
  */
 export function governSignIn(auth, options) {
-    const { gate, lock, sessionAnswers, log, onSignOutDeclined = () => {}, now = Date.now } = options;
-    const handleAutoLogin = auth.handleAutoLogin;
+    const {
+        gate,
+        lock,
+        jar = {},
+        sessionAnswers,
+        log,
+        primaryPasswordEnabled = () => false,
+        onSignOutDeclined = () => {},
+        now = Date.now
+    } = options;
     const handleLogoutEvent = auth.handleLogoutEvent;
     const relogin = auth.relogin;
+    const settled = () => (typeof jar.whenSettled === 'function' ? jar.whenSettled() : Promise.resolve());
     let autoLoginInFlight = null;
     let signOutInFlight = null;
     let verifiedAt = -Infinity;
@@ -345,6 +354,47 @@ export function governSignIn(auth, options) {
         return ok;
     }
 
+    /**
+     * The saved login, password and all, without the cookies saved beside it:
+     * the jar is the source of truth on the Hub, the saved copy is older.
+     *
+     * @param {any} user
+     */
+    const withoutSavedCookies = (user) => {
+        const { cookies: _saved, ...rest } = user ?? {};
+        return rest;
+    };
+
+    /** Under the lock. */
+    async function signBackIn() {
+        const userId = auth.loginForm?.lastUserLoggedIn;
+        if (!userId) {
+            // Signed out: the session keeper takes it from here.
+            return;
+        }
+        if (primaryPasswordEnabled()) {
+            log('Not signing in again: the primary password is on, which upstream never signs in past');
+            return;
+        }
+        const user = await auth.getSavedCredentials(userId);
+        if (!user) {
+            log(`Not signing in again: no saved login for ${userId}`);
+            return;
+        }
+        log('The session is gone; signing in again from the saved login');
+        auth.setAttemptingAutoLogin?.(true);
+        try {
+            await relogin(withoutSavedCookies(user), { shouldTrackLoginNetworkIssueHint: false });
+        } catch (err) {
+            const reason = String(err?.message ?? err).split(/\r?\n/)[0];
+            log(`Signing in again failed: ${reason}`);
+        } finally {
+            auth.setAttemptingAutoLogin?.(false);
+            // relogin's failure path signs out, which clears the jar.
+            await settled();
+        }
+    }
+
     auth.handleAutoLogin = () => {
         if (autoLoginInFlight) {
             return autoLoginInFlight;
@@ -362,7 +412,7 @@ export function governSignIn(auth, options) {
                     return;
                 }
                 verifiedAt = -Infinity;
-                await handleAutoLogin();
+                await signBackIn();
             })
             .finally(() => {
                 autoLoginInFlight = null;
@@ -370,10 +420,10 @@ export function governSignIn(auth, options) {
         return autoLoginInFlight;
     };
 
-    // Upstream also signs out by itself: the friend list failing to load, or
-    // the fourth auto-login in an hour. On the Hub every one of those is a
-    // reaction to a 401, and a sign-out clears the jar and starts a password
-    // sign-in, so it is only worth doing when the session really is gone.
+    // Upstream also signs out by itself when the friend list fails to load.
+    // On the Hub that is a reaction to a 401, and a sign-out clears the jar
+    // and starts a password sign-in, so it is only worth doing when the
+    // session really is gone.
     auth.handleLogoutEvent = (...args) => {
         if (signOutInFlight) {
             return signOutInFlight;
@@ -387,6 +437,8 @@ export function governSignIn(auth, options) {
                 }
                 verifiedAt = -Infinity;
                 await handleLogoutEvent(...args);
+                // runLogoutFlow does not await its clearCookies().
+                await settled();
             })
             .finally(() => {
                 signOutInFlight = null;
@@ -394,15 +446,18 @@ export function governSignIn(auth, options) {
         return signOutInFlight;
     };
 
+    // The session keeper's own sign-in: under the lock like the rest.
     auth.relogin = (user, reloginOptions) =>
         lock.run(async () => {
             if (gate.secondFactorPending()) {
                 throw new Error('VRChat is waiting for a second factor; a client has to enter it');
             }
             verifiedAt = -Infinity;
-            // The jar is the source of truth on the Hub; the saved copy is older.
-            const { cookies: _saved, ...withoutCookies } = user ?? {};
-            return relogin(withoutCookies, reloginOptions);
+            try {
+                return await relogin(withoutSavedCookies(user), reloginOptions);
+            } finally {
+                await settled();
+            }
         });
 }
 

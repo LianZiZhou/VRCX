@@ -98,26 +98,33 @@ describe('session lock', () => {
         expect(order).toEqual(['a start', 'a end', 'b']);
     });
 
-    it('lets work started inside the lock run at once, and holds on until it has finished', async () => {
+    it('queues work a locked task scheduled for later, however it was started', async () => {
+        // The bug in the first version: a timer set inside a locked task (the
+        // friend-list retry) inherited the task's context, was taken for
+        // nested work, skipped the queue, and ran a re-login next to a check.
         const lock = createSessionLock();
         const order = [];
-        const clearing = deferred();
-        // A re-login whose failure path signs out, which clears the cookies
-        // without awaiting it -- what upstream's runLogoutFlow does.
-        const relogin = lock.run(async () => {
-            order.push('relogin');
-            void lock.run(async () => {
-                order.push('clear start');
-                await clearing.promise;
-                order.push('clear end');
-            });
+        const checking = deferred();
+        let fromTimer = null;
+        const declined = lock.run(async () => {
+            order.push('declined sign-out');
+            setTimeout(() => {
+                fromTimer = lock.run(() => order.push('retry from timer'));
+            }, 0);
         });
-        const next = lock.run(() => order.push('next sign-in'));
+        const check = lock.run(async () => {
+            order.push('check start');
+            await checking.promise;
+            order.push('check end');
+        });
+        await declined;
         await settle();
-        expect(order).toEqual(['relogin', 'clear start']);
-        clearing.resolve();
-        await Promise.all([relogin, next]);
-        expect(order).toEqual(['relogin', 'clear start', 'clear end', 'next sign-in']);
+        await settle();
+        expect(order).toEqual(['declined sign-out', 'check start']);
+        checking.resolve();
+        await check;
+        await fromTimer;
+        expect(order).toEqual(['declined sign-out', 'check start', 'check end', 'retry from timer']);
     });
 
     it('keeps going after a task fails', async () => {
@@ -132,7 +139,7 @@ describe('cookie jar guard', () => {
         // The bug: the C# clear swapped the jar under an in-flight sign-in,
         // whose fresh `auth` landed in the jar nobody reads any more.
         const native = fakeWebApi([cookie('auth', 'dead'), cookie('twoFactorAuth', 'device')]);
-        const webApi = guardCookieJar(native, { log: () => {}, lock: createSessionLock() });
+        const webApi = guardCookieJar(native, { log: () => {} });
         const signIn = deferred();
         native.gates.set('https://api/sign-in', signIn);
 
@@ -141,8 +148,17 @@ describe('cookie jar guard', () => {
         await settle();
         expect(native.calls).not.toContain('ClearCookies');
 
+        // A sign-out waiting on it would wait here too.
+        let settledEarly = false;
+        void webApi.whenSettled().then(() => {
+            settledEarly = true;
+        });
+        await settle();
+        expect(settledEarly).toBe(false);
+
         signIn.resolve();
         await Promise.all([signingIn, clearing]);
+        await webApi.whenSettled();
         // Cleared after the sign-in landed: the device cookie is kept, the
         // sign-in's `auth` is gone with the rest, as a sign-out should do.
         expect(native.calls).toEqual(['https://api/sign-in', 'ClearCookies', 'SetCookies']);
@@ -152,7 +168,7 @@ describe('cookie jar guard', () => {
     it("adds what the jar lacks and never overwrites the Hub's own cookies", async () => {
         const native = fakeWebApi([cookie('auth', 'fresh')]);
         const lines = [];
-        const webApi = guardCookieJar(native, { log: (line) => lines.push(line), lock: createSessionLock() });
+        const webApi = guardCookieJar(native, { log: (line) => lines.push(line) });
 
         await webApi.SetCookies(encodeCookies([cookie('auth', 'stale'), cookie('twoFactorAuth', 'device')]));
         expect(native.jar()).toEqual(['auth=fresh', 'twoFactorAuth=device']);
@@ -162,11 +178,7 @@ describe('cookie jar guard', () => {
     it('does not wait forever for a request that never returns', async () => {
         const native = fakeWebApi([cookie('auth', 'dead')]);
         const lines = [];
-        const webApi = guardCookieJar(native, {
-            log: (line) => lines.push(line),
-            lock: createSessionLock(),
-            drainTimeoutMs: 10
-        });
+        const webApi = guardCookieJar(native, { log: (line) => lines.push(line), drainTimeoutMs: 10 });
         native.gates.set('https://api/hangs', deferred());
         void webApi.ExecuteJson(JSON.stringify({ url: 'https://api/hangs' }));
         await webApi.ClearCookies();
@@ -202,7 +214,7 @@ describe('sign-in gate', () => {
 
 describe('session governor', () => {
     /**
-     * @param {{ alive?: () => boolean }} [options]
+     * @param {{ alive?: () => boolean, jar?: object, reloginGate?: Promise<void> }} [options]
      */
     function setup(options = {}) {
         let time = 0;
@@ -212,20 +224,25 @@ describe('session governor', () => {
         const declined = [];
         const lock = createSessionLock();
         const auth = {
-            handleAutoLogin: async () => {
-                calls.push('autoLogin');
-            },
+            loginForm: { lastUserLoggedIn: 'usr_x' },
+            getSavedCredentials: async (userId) => ({ user: { id: userId }, loginParams: {}, cookies: 'saved' }),
+            setAttemptingAutoLogin: () => {},
+            handleAutoLogin: async () => calls.push('upstream auto-login'),
             handleLogoutEvent: async () => {
                 calls.push('signed out');
             },
             relogin: async (user) => {
                 calls.push(['relogin', user]);
+                if (options.reloginGate) {
+                    await options.reloginGate;
+                }
             }
         };
         const gate = createSignInGate({ now: () => time });
         governSignIn(auth, {
             gate,
             lock,
+            jar: options.jar,
             log: (line) => lines.push(line),
             now: () => time,
             onSignOutDeclined: () => declined.push('retry friends'),
@@ -237,46 +254,47 @@ describe('session governor', () => {
         return { auth, gate, lock, calls, checks, lines, declined, advance: (ms) => (time += ms) };
     }
 
-    it('answers a burst of 401s with one check and at most one re-login', async () => {
+    it('answers a burst of 401s with one check and one sign-in from the saved login', async () => {
         const { auth, calls, checks } = setup();
         await Promise.all(Array.from({ length: 30 }, () => auth.handleAutoLogin()));
         expect(checks).toHaveLength(1);
-        expect(calls).toEqual(['autoLogin']);
+        // Upstream's own flow is not used, and the saved cookies stay out.
+        expect(calls).toEqual([['relogin', { user: { id: 'usr_x' }, loginParams: {} }]]);
     });
 
     it('never runs a sign-out and a re-login at the same time', async () => {
-        // One failing friends page used to start both at once: a password
-        // sign-in from handleAutoLogin, and a sign-out (with its jar clear)
-        // from friendSyncCoordinator.
-        let time = 0;
-        const order = [];
-        const lock = createSessionLock();
+        // One failing friends page used to start both at once.
         const signingIn = deferred();
-        const auth = {
-            handleAutoLogin: async () => {
-                order.push('sign-in start');
-                await signingIn.promise;
-                order.push('sign-in end');
-            },
-            handleLogoutEvent: async () => order.push('sign-out'),
-            relogin: async () => {}
-        };
-        governSignIn(auth, {
-            gate: createSignInGate(),
-            lock,
-            log: () => {},
-            now: () => time,
-            sessionAnswers: async () => false
-        });
+        const { auth, calls } = setup({ reloginGate: signingIn.promise });
         const a = auth.handleAutoLogin();
         const b = auth.handleLogoutEvent();
         await settle();
         await settle();
-        expect(order).toEqual(['sign-in start']);
+        expect(calls).toEqual([['relogin', expect.anything()]]);
         signingIn.resolve();
         await Promise.all([a, b]);
-        expect(order).toEqual(['sign-in start', 'sign-in end', 'sign-out']);
-        time += 1;
+        expect(calls.at(-1)).toBe('signed out');
+    });
+
+    it('waits for the jar clear a sign-out started before letting the next sign-in go', async () => {
+        const clearing = deferred();
+        let cleared = false;
+        const jar = {
+            whenSettled: async () => {
+                await clearing.promise;
+                cleared = true;
+            }
+        };
+        const { auth, calls } = setup({ jar });
+        const signOut = auth.handleLogoutEvent();
+        const next = auth.relogin({ user: { id: 'usr_x' } });
+        await settle();
+        await settle();
+        expect(calls).toEqual(['signed out']);
+        clearing.resolve();
+        await Promise.all([signOut, next]);
+        expect(cleared).toBe(true);
+        expect(calls).toEqual(['signed out', ['relogin', { user: { id: 'usr_x' } }]]);
     });
 
     it('ignores 401s and declines sign-outs while the session works, and says so', async () => {
@@ -288,7 +306,6 @@ describe('session governor', () => {
         expect(checks).toHaveLength(1);
         expect(declined).toEqual(['retry friends']);
         expect(lines).toContain('Not signing out: the session still works');
-        // Much later, a 401 is worth asking about again.
         advance(60000);
         await auth.handleAutoLogin();
         expect(checks).toHaveLength(2);
@@ -300,6 +317,13 @@ describe('session governor', () => {
         expect(calls).toEqual(['signed out']);
     });
 
+    it('leaves a signed-out Hub to the session keeper', async () => {
+        const { auth, calls } = setup();
+        auth.loginForm.lastUserLoggedIn = '';
+        await auth.handleAutoLogin();
+        expect(calls).toEqual([]);
+    });
+
     it('does nothing while VRChat waits for a second factor', async () => {
         const { auth, gate, calls, checks } = setup();
         gate.note('sign-in', outcome(200, ['totp', 'otp']));
@@ -309,7 +333,7 @@ describe('session governor', () => {
         await expect(auth.relogin({ user: { id: 'usr_x' } })).rejects.toThrow(/second factor/);
     });
 
-    it('re-logs in under the lock without restoring the saved cookies', async () => {
+    it('runs the session keeper re-login under the lock without the saved cookies', async () => {
         const { auth, calls } = setup();
         await auth.relogin({ user: { id: 'usr_x' }, loginParams: { username: 'x' }, cookies: 'saved' }, { a: 1 });
         expect(calls).toEqual([['relogin', { user: { id: 'usr_x' }, loginParams: { username: 'x' } }]]);

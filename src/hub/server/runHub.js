@@ -209,7 +209,7 @@ export async function runHub(options = {}) {
         // Outermost, so every caller goes through it: the jar is never cleared
         // under a request in flight, only moves forward, and a sign-out keeps
         // the two-factor device.
-        natives.WebApi = guardCookieJar(natives.WebApi, { log, lock: sessionLock });
+        natives.WebApi = guardCookieJar(natives.WebApi, { log });
     }
 
     // One connection, many writers: the Hub's own statements and every
@@ -257,7 +257,9 @@ export async function runHub(options = {}) {
     governSignIn(stores.auth, {
         gate: signInGate,
         lock: sessionLock,
+        jar: natives.WebApi,
         log,
+        primaryPasswordEnabled: () => stores.advancedSettings?.enablePrimaryPassword === true,
         onSignOutDeclined: () => retryFriendList(),
         // A user from auth/user, and data from outside it: auth/user alone
         // once answered while everything else said "Missing Credentials".

@@ -375,9 +375,12 @@ password sign-in (`handleAutoLogin`) and a sign-out that clears the jar
 without awaiting it, and the sign-out resets the three-per-hour counter, so
 the loop never stops. `server/signInAuthority.js` puts every session change --
 re-login, sign-out, clearing or setting cookies, a client's sign-in or
-two-factor verification -- under one re-entrant lock that is held until work
-started inside it has finished; a jar clear waits for the requests in flight
-and keeps the two-factor device cookie; a 401 or an automatic sign-out acts
+two-factor verification -- under one FIFO lock (not re-entrant: a context-based
+version leaked into timers started inside a locked task, which then skipped
+the queue); a jar clear waits for the requests in flight and keeps the
+two-factor device cookie, and the task that caused it waits for the clear;
+the Hub's re-login after a 401 is its own, not upstream's auto-login flow,
+which signs out from inside itself; a 401 or an automatic sign-out acts
 only if `auth/user` and an endpoint outside it both fail; saved cookies never
 overwrite the jar; and while VRChat waits for a second factor nothing signs
 in with the password. `services/request.js` no longer merges a sign-in (its
