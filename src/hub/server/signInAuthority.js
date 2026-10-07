@@ -47,6 +47,15 @@ export const SECOND_FACTOR_WAIT_MS = 10 * 60 * 1000;
 /** A successful session check covers 401s arriving within this window. */
 export const SESSION_CHECK_TTL_MS = 10 * 1000;
 
+/**
+ * The Hub's own password sign-ins: at most this many per hour, this far
+ * apart. On 2026-10-07 a session that died for good got eleven in eleven
+ * seconds, and VRChat answered the twelfth with 401. A person can always sign
+ * in from a client; the Hub just stops trying.
+ */
+export const MAX_SIGN_INS_PER_HOUR = 3;
+export const MIN_SIGN_IN_GAP_MS = 60 * 1000;
+
 /** How long a jar clear waits for the requests in flight before going ahead anyway. */
 export const DRAIN_TIMEOUT_MS = 15 * 1000;
 
@@ -316,6 +325,7 @@ export function guardCookieJar(WebApi, options) {
  * @param {() => Promise<boolean>} options.sessionAnswers - does the current jar get a user and data back
  * @param {(message: string) => void} options.log
  * @param {() => boolean} [options.primaryPasswordEnabled] - upstream never signs in by itself then
+ * @param {() => Promise<void>} [options.dropSession] - empty the jar but for the device cookie (the guarded ClearCookies)
  * @param {() => void} [options.onSignOutDeclined] - an automatic sign-out was skipped; e.g. load the friends again
  * @param {() => number} [options.now]
  */
@@ -327,9 +337,52 @@ export function governSignIn(auth, options) {
         sessionAnswers,
         log,
         primaryPasswordEnabled = () => false,
+        dropSession = async () => {},
         onSignOutDeclined = () => {},
         now = Date.now
     } = options;
+    /** @type {number[]} when the Hub signed in with the password */
+    const signIns = [];
+
+    /**
+     * A password sign-in by the Hub, if the brake allows one. Called under
+     * the lock.
+     *
+     * First the dead `auth` cookie goes. With it still in the jar VRChat
+     * answers the Basic sign-in with 200 and a user but sets no new `auth`, so
+     * the next request is "Missing Credentials" again -- every storm since
+     * 2026-10-05 had that shape, and the only sign-ins that held came straight
+     * after a sign-out had emptied the jar.
+     *
+     * @param {any} user - a saved login
+     * @param {any} reloginOptions
+     * @returns {Promise<boolean>} whether a sign-in was attempted
+     */
+    async function passwordSignIn(user, reloginOptions) {
+        const recent = signIns.filter((at) => now() - at < 60 * 60 * 1000);
+        signIns.splice(0, signIns.length, ...recent);
+        if (recent.length >= MAX_SIGN_INS_PER_HOUR) {
+            log(
+                `Not signing in again: ${recent.length} password sign-ins in the last hour already; ` +
+                    'sign in from a client, or wait'
+            );
+            return false;
+        }
+        if (recent.length > 0 && now() - recent.at(-1) < MIN_SIGN_IN_GAP_MS) {
+            log('Not signing in again yet: the last password sign-in was less than a minute ago');
+            return false;
+        }
+        signIns.push(now());
+        verifiedAt = -Infinity;
+        await dropSession();
+        try {
+            await relogin(withoutSavedCookies(user), reloginOptions);
+        } finally {
+            // relogin's failure path signs out, which clears the jar.
+            await settled();
+        }
+        return true;
+    }
     const handleLogoutEvent = auth.handleLogoutEvent;
     const relogin = auth.relogin;
     const settled = () => (typeof jar.whenSettled === 'function' ? jar.whenSettled() : Promise.resolve());
@@ -384,14 +437,12 @@ export function governSignIn(auth, options) {
         log('The session is gone; signing in again from the saved login');
         auth.setAttemptingAutoLogin?.(true);
         try {
-            await relogin(withoutSavedCookies(user), { shouldTrackLoginNetworkIssueHint: false });
+            await passwordSignIn(user, { shouldTrackLoginNetworkIssueHint: false });
         } catch (err) {
             const reason = String(err?.message ?? err).split(/\r?\n/)[0];
             log(`Signing in again failed: ${reason}`);
         } finally {
             auth.setAttemptingAutoLogin?.(false);
-            // relogin's failure path signs out, which clears the jar.
-            await settled();
         }
     }
 
@@ -452,11 +503,8 @@ export function governSignIn(auth, options) {
             if (gate.secondFactorPending()) {
                 throw new Error('VRChat is waiting for a second factor; a client has to enter it');
             }
-            verifiedAt = -Infinity;
-            try {
-                return await relogin(withoutSavedCookies(user), reloginOptions);
-            } finally {
-                await settled();
+            if (!(await passwordSignIn(user, reloginOptions))) {
+                throw new Error('Held back: too many password sign-ins by the Hub recently');
             }
         });
 }
@@ -498,9 +546,10 @@ export function clientRequestOptions(method, args) {
  * @param {ReturnType<typeof createSessionLock>} options.lock
  * @param {() => boolean} options.hubSignedIn
  * @param {(message: string) => void} options.log
+ * @param {() => Promise<void>} [options.dropSession] - as for governSignIn: a dead `auth` keeps the new one out
  * @returns {(className: string, method: string, args: any[], client: any, next: () => Promise<any>) => Promise<any>}
  */
-export function createClientSessionPolicy({ lock, hubSignedIn, log }) {
+export function createClientSessionPolicy({ lock, hubSignedIn, log, dropSession = async () => {} }) {
     return async function apply(className, method, args, client, next) {
         if (className !== 'WebApi') {
             return next(args);
@@ -537,7 +586,10 @@ export function createClientSessionPolicy({ lock, hubSignedIn, log }) {
                         const stripped = { ...request, headers: rest };
                         return next([method === 'ExecuteJson' ? JSON.stringify(stripped) : stripped]);
                     }
-                    return lock.run(() => next(args));
+                    return lock.run(async () => {
+                        await dropSession();
+                        return next(args);
+                    });
                 }
                 if (/\/auth\/twofactorauth\/[^/]+\/verify$/.test(path)) {
                     return lock.run(() => next(args));

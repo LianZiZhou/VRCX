@@ -258,6 +258,7 @@ export async function runHub(options = {}) {
         gate: signInGate,
         lock: sessionLock,
         jar: natives.WebApi,
+        dropSession: () => natives.WebApi.ClearCookies(),
         log,
         primaryPasswordEnabled: () => stores.advancedSettings?.enablePrimaryPassword === true,
         onSignOutDeclined: () => retryFriendList(),
@@ -311,6 +312,7 @@ export async function runHub(options = {}) {
     const clientSessionPolicy = createClientSessionPolicy({
         lock: sessionLock,
         hubSignedIn: () => watchState.isLoggedIn === true,
+        dropSession: () => natives.WebApi.ClearCookies(),
         log
     });
     const handleCall = async (className, method, args, client) => {

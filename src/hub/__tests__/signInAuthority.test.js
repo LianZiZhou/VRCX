@@ -14,6 +14,8 @@ import {
     encodeCookies,
     governSignIn,
     guardCookieJar,
+    MAX_SIGN_INS_PER_HOUR,
+    MIN_SIGN_IN_GAP_MS,
     SECOND_FACTOR_WAIT_MS
 } from '../server/signInAuthority.js';
 
@@ -243,6 +245,7 @@ describe('session governor', () => {
             gate,
             lock,
             jar: options.jar,
+            dropSession: async () => calls.push('dropped the dead auth'),
             log: (line) => lines.push(line),
             now: () => time,
             onSignOutDeclined: () => declined.push('retry friends'),
@@ -258,8 +261,9 @@ describe('session governor', () => {
         const { auth, calls, checks } = setup();
         await Promise.all(Array.from({ length: 30 }, () => auth.handleAutoLogin()));
         expect(checks).toHaveLength(1);
-        // Upstream's own flow is not used, and the saved cookies stay out.
-        expect(calls).toEqual([['relogin', { user: { id: 'usr_x' }, loginParams: {} }]]);
+        // Upstream's own flow is not used, the dead auth goes first (with it in
+        // the jar VRChat sets no new one), and the saved cookies stay out.
+        expect(calls).toEqual(['dropped the dead auth', ['relogin', { user: { id: 'usr_x' }, loginParams: {} }]]);
     });
 
     it('never runs a sign-out and a re-login at the same time', async () => {
@@ -270,7 +274,7 @@ describe('session governor', () => {
         const b = auth.handleLogoutEvent();
         await settle();
         await settle();
-        expect(calls).toEqual([['relogin', expect.anything()]]);
+        expect(calls).toEqual(['dropped the dead auth', ['relogin', expect.anything()]]);
         signingIn.resolve();
         await Promise.all([a, b]);
         expect(calls.at(-1)).toBe('signed out');
@@ -294,7 +298,7 @@ describe('session governor', () => {
         clearing.resolve();
         await Promise.all([signOut, next]);
         expect(cleared).toBe(true);
-        expect(calls).toEqual(['signed out', ['relogin', { user: { id: 'usr_x' } }]]);
+        expect(calls).toEqual(['signed out', 'dropped the dead auth', ['relogin', { user: { id: 'usr_x' } }]]);
     });
 
     it('ignores 401s and declines sign-outs while the session works, and says so', async () => {
@@ -336,7 +340,37 @@ describe('session governor', () => {
     it('runs the session keeper re-login under the lock without the saved cookies', async () => {
         const { auth, calls } = setup();
         await auth.relogin({ user: { id: 'usr_x' }, loginParams: { username: 'x' }, cookies: 'saved' }, { a: 1 });
-        expect(calls).toEqual([['relogin', { user: { id: 'usr_x' }, loginParams: { username: 'x' } }]]);
+        expect(calls).toEqual([
+            'dropped the dead auth',
+            ['relogin', { user: { id: 'usr_x' }, loginParams: { username: 'x' } }]
+        ]);
+    });
+
+    it('stops signing in with the password after a few in an hour', async () => {
+        // 2026-10-07: a session that died for good got eleven sign-ins in
+        // eleven seconds, and VRChat refused the twelfth.
+        const { auth, calls, lines, advance } = setup({ alive: () => false });
+        for (let i = 0; i < 20; i++) {
+            await auth.handleAutoLogin();
+            advance(1000);
+        }
+        // One per minute at most, so only the first got through in 20 s.
+        expect(calls.filter((call) => Array.isArray(call))).toHaveLength(1);
+        expect(lines).toContain('Not signing in again yet: the last password sign-in was less than a minute ago');
+
+        for (let i = 0; i < 10; i++) {
+            advance(MIN_SIGN_IN_GAP_MS);
+            await auth.handleAutoLogin();
+        }
+        expect(calls.filter((call) => Array.isArray(call))).toHaveLength(MAX_SIGN_INS_PER_HOUR);
+        expect(lines.at(-1)).toMatch(/password sign-ins in the last hour already/);
+        // The keeper is refused too, loudly.
+        await expect(auth.relogin({ user: { id: 'usr_x' } })).rejects.toThrow(/too many password sign-ins/);
+
+        // An hour on, it may try again.
+        advance(60 * 60 * 1000);
+        await auth.handleAutoLogin();
+        expect(calls.filter((call) => Array.isArray(call))).toHaveLength(MAX_SIGN_INS_PER_HOUR + 1);
     });
 });
 
@@ -345,7 +379,12 @@ describe('what a client may do to the session', () => {
         const lines = [];
         const sent = [];
         const lock = createSessionLock();
-        const policy = createClientSessionPolicy({ lock, hubSignedIn: () => signedIn, log: (l) => lines.push(l) });
+        const policy = createClientSessionPolicy({
+            lock,
+            hubSignedIn: () => signedIn,
+            log: (l) => lines.push(l),
+            dropSession: async () => sent.push(['dropped the dead auth'])
+        });
         const client = { clientName: 'vrcx-windows' };
         const call = (className, method, args, answer = undefined) =>
             policy(className, method, args, client, async (callArgs) => {
@@ -401,7 +440,8 @@ describe('what a client may do to the session', () => {
         expect(sent).toEqual([]);
         busy.resolve();
         await Promise.all([holding, signing]);
-        expect(sent[0][1][0].headers).toEqual({ Authorization: 'Basic x' });
+        expect(sent[0]).toEqual(['dropped the dead auth']);
+        expect(sent[1][1][0].headers).toEqual({ Authorization: 'Basic x' });
     });
 
     it('passes everything else through', async () => {
