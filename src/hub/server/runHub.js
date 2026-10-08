@@ -313,6 +313,12 @@ export async function runHub(options = {}) {
         lock: sessionLock,
         hubSignedIn: () => watchState.isLoggedIn === true,
         dropSession: () => natives.WebApi.ClearCookies(),
+        // Checks first, and is braked: a mirror's 401 cannot start a storm.
+        onUnauthorized: () => {
+            if (watchState.isLoggedIn) {
+                void stores.auth.handleAutoLogin();
+            }
+        },
         log
     });
     const handleCall = async (className, method, args, client) => {

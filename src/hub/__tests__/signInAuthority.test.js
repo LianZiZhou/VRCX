@@ -444,6 +444,23 @@ describe('what a client may do to the session', () => {
         expect(sent[1][1][0].headers).toEqual({ Authorization: 'Basic x' });
     });
 
+    it("tells the Hub when a client's request finds the session gone", async () => {
+        const lines = [];
+        const noticed = [];
+        const policy = createClientSessionPolicy({
+            lock: createSessionLock(),
+            hubSignedIn: () => true,
+            log: (l) => lines.push(l),
+            onUnauthorized: () => noticed.push('check the session')
+        });
+        const request = { url: 'https://api.vrchat.cloud/api/1/users/usr_1/mutuals', method: 'GET' };
+        const dead = { status: 401, message: '{"error":{"message":"\\"Missing Credentials\\"","status_code":401}}' };
+        await expect(policy('WebApi', 'Execute', [request], {}, async () => dead)).resolves.toBe(dead);
+        await policy('WebApi', 'Execute', [request], {}, async () => ({ status: 404, message: '{}' }));
+        await policy('WebApi', 'Execute', [request], {}, async () => ({ status: 200, message: '{}' }));
+        expect(noticed).toEqual(['check the session']);
+    });
+
     it('passes everything else through', async () => {
         const { call, sent } = setup();
         await call('SQLite', 'Execute', ['SELECT 1']);

@@ -547,9 +547,26 @@ export function clientRequestOptions(method, args) {
  * @param {() => boolean} options.hubSignedIn
  * @param {(message: string) => void} options.log
  * @param {() => Promise<void>} [options.dropSession] - as for governSignIn: a dead `auth` keeps the new one out
+ * @param {() => void} [options.onUnauthorized] - a client's request came back "Missing Credentials"; the Hub
+ *   should check its session. Mirrors never repair it themselves, so without this a session that died while
+ *   only mirrors were busy stayed dead until the Hub's own next request, minutes later.
  * @returns {(className: string, method: string, args: any[], client: any, next: () => Promise<any>) => Promise<any>}
  */
-export function createClientSessionPolicy({ lock, hubSignedIn, log, dropSession = async () => {} }) {
+export function createClientSessionPolicy({
+    lock,
+    hubSignedIn,
+    log,
+    dropSession = async () => {},
+    onUnauthorized = () => {}
+}) {
+    /** @param {any} result */
+    const watch = (result) => {
+        if (result?.status === 401 && String(result?.message ?? '').includes('Missing Credentials')) {
+            onUnauthorized();
+        }
+        return result;
+    };
+
     return async function apply(className, method, args, client, next) {
         if (className !== 'WebApi') {
             return next(args);
@@ -594,7 +611,7 @@ export function createClientSessionPolicy({ lock, hubSignedIn, log, dropSession 
                 if (/\/auth\/twofactorauth\/[^/]+\/verify$/.test(path)) {
                     return lock.run(() => next(args));
                 }
-                return next(args);
+                return watch(await next(args));
             }
             default:
                 return next(args);
